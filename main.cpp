@@ -9,12 +9,16 @@
 #include <ranges>
 #include <span>
 
+#include "randomsipa.h"
+
 using namespace std::chrono_literals;
 
 //! Expected time between blocks. Used as parameter for the exponential distribution we are sampling from.
 static constexpr std::chrono::milliseconds BLOCK_INTERVAL{600'000};
 //! How often to print statistics.
 static constexpr std::chrono::milliseconds PRINT_FREQ{BLOCK_INTERVAL * 144};
+//! We use integers in [0;100] for percentages. This is the multiplier to map them to [0; uint64_t::MAX].
+static constexpr uint64_t PERC_MULTIPLIER{std::numeric_limits<uint64_t>::max() / 100};
 
 struct Block {
     //! Which miner created this block.
@@ -113,18 +117,17 @@ struct Miner {
 };
 
 /** Draw the time between the last and the next block from the given exponential distribution. */
-std::chrono::milliseconds NextBlockInterval(std::exponential_distribution<double>& interval, std::mt19937& uniform)
+std::chrono::milliseconds NextBlockInterval(RNG& rng)
 {
-    return std::chrono::milliseconds(static_cast<long>(std::round(interval(uniform)))); // FIXME: check precision
+    return std::chrono::milliseconds(static_cast<long>(std::round(rng.exporand(BLOCK_INTERVAL.count())))); // FIXME: check precision
 }
 
 /** Pick which miner found the last block based on its hashrate and a uniform distribution. */
-Miner& PickFinder(std::vector<Miner>& miners, std::mt19937& uniform)
+Miner& PickFinder(std::vector<Miner>& miners, RNG& rng)
 {
-    static_assert(std::mt19937::max() == std::numeric_limits<uint32_t>::max());
-    uint64_t i{0}, random{uniform() * 100}; // miner.perc is in range [0; 100]
+    uint64_t random{rng.rand64()}, i{0};
     for (auto& miner: miners) {
-        i += miner.perc * std::mt19937::max();
+        i += miner.perc * PERC_MULTIPLIER;
         if (i >= random) return miner;
     }
     assert(!"The miners' percentages must add up to 100.");
@@ -147,15 +150,13 @@ int main()
 {
     // Create a number of miners with a given set of parameters.
     std::random_device rd;
-    // Randomly seeded uniform distributions used to draw from the exponential distribution the time
-    // before the next block and to draw which miner found the block based on its hashrate.
-    std::mt19937 uniform_exp{rd()}, uniform_miner{rd()};
-    // An exponential distribution, representing the time between blocks.
-    std::exponential_distribution<double> block_interval{1.0 / BLOCK_INTERVAL.count()};
+    // Random number generators used to respectively pick the time before the next block interval and
+    // pick which miner found the last block.
+    RNG block_interval{rd()}, miner_picker{rd()};
 
     // Absolute time of the next block arrival. Since we are starting from 0, for the first one this is
     // just the block interval itself.
-    std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval, uniform_exp)};
+    std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval)};
 
     // Create our set of miners. The share of network hashrate must add up to 1.
     std::vector<Miner> miners;
@@ -171,9 +172,9 @@ int main()
     for (std::chrono::milliseconds cur_time{0}; ; cur_time += 10ms) {
         // Has a block been found by now?
         if (cur_time >= next_block_time) {
-            Miner& miner{PickFinder(miners, uniform_miner)};
+            Miner& miner{PickFinder(miners, miner_picker)};
             miner.FoundBlock(next_block_time);
-            next_block_time += NextBlockInterval(block_interval, uniform_exp);
+            next_block_time += NextBlockInterval(block_interval);
         }
 
         // Check if any miner needs to change the chain it is mining on. That is, if any other miner's
