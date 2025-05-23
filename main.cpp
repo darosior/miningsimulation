@@ -91,9 +91,9 @@ struct Miner {
             if (i > chain.size() - 1) {
                 chain.push_back(best_chain[i]);
             } else if (chain[i] != best_chain[i]) {
-                chain[i] = best_chain[i];
                 // This block was reorged out. If it's ours, update the stale block counter.
                 if (chain[i].miner_id == id) stale_blocks++;
+                chain[i] = best_chain[i];
             }
             // else: same block at same height.
         }
