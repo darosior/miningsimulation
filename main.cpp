@@ -34,22 +34,13 @@ struct Block {
     }
 };
 
-std::chrono::milliseconds SampleNextBlock(std::mt19937& uniform, std::exponential_distribution<double>& interval, std::chrono::milliseconds last_block)
-{
-    return last_block + std::chrono::milliseconds(static_cast<long>(std::round(interval(uniform)))); // FIXME: check precision
-}
-
 struct Miner {
     //! Miner identifier used to track which miner created a certain block.
     unsigned id;
-    //! Share of the total network hashrate controlled by the miner.
-    double perc;
+    //! Share of the total network hashrate controlled by the miner, as an integer between 0 and 100.
+    uint64_t perc;
     //! The time for blocks produced by this miner to reach all other miners.
     std::chrono::milliseconds propagation;
-    //! A randomly seeded uniform distribution used to draw from the exponential distribution below.
-    std::mt19937 uniform;
-    //! An exponential distribution, representing the time between blocks for this miner.
-    std::exponential_distribution<double> block_interval;
     //! Local chain on the miner's full node. May differ slightly between miners due to propagation time.
     std::vector<Block> chain;
     //! The next time this miner will find a block, sampled from an exponential distribution parameterized by its share of total network hashrate.
@@ -57,20 +48,13 @@ struct Miner {
     //! Number of blocks this miner created that were reorged out.
     int stale_blocks;
 
-    explicit Miner(unsigned id_, double perc_, std::chrono::milliseconds prop, std::random_device& rd)
-        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, uniform{rd()}, block_interval{perc / BLOCK_INTERVAL.count()}, stale_blocks{0}
-    {
-        next_block = SampleNextBlock(uniform, block_interval, 0s);
-    }
+    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, std::random_device& rd)
+        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}
+    {}
 
-    /** Add a block to this miner's local chain if we are now past the time of its next block. */
-    void MaybeFoundBlock(std::chrono::milliseconds cur_time) {
-        if (cur_time < next_block) return;
-        // Note how we use the block's time for propagation and not the current time, because the
-        // latter might be less precise (for instance if we advance time by 10ms in the simulation).
-        chain.emplace_back(id, next_block + propagation);
-        // Always sample immediately after having found a block. Use the block time for the same reasons.
-        next_block = SampleNextBlock(uniform, block_interval, next_block);
+    /** Add a block found at the given block time to this miner's local chain. */
+    void FoundBlock(std::chrono::milliseconds block_time) {
+        chain.emplace_back(id, block_time + propagation);
     }
 
     /** Count the number of not-yet-propagated blocks in this miner's local chain. */
@@ -128,16 +112,33 @@ struct Miner {
     }
 };
 
+/** Draw the time between the last and the next block from the given exponential distribution. */
+std::chrono::milliseconds NextBlockInterval(std::exponential_distribution<double>& interval, std::mt19937& uniform)
+{
+    return std::chrono::milliseconds(static_cast<long>(std::round(interval(uniform)))); // FIXME: check precision
+}
+
+/** Pick which miner found the last block based on its hashrate and a uniform distribution. */
+Miner& PickFinder(std::vector<Miner>& miners, std::mt19937& uniform)
+{
+    static_assert(std::mt19937::max() == std::numeric_limits<uint32_t>::max());
+    uint64_t i{0}, random{uniform() * 100}; // miner.perc is in range [0; 100]
+    for (auto& miner: miners) {
+        i += miner.perc * std::mt19937::max();
+        if (i >= random) return miner;
+    }
+    assert(!"The miners' percentages must add up to 100.");
+}
+
 /** Simulate the Bitcoin mining process with a given number of miners, each with a given share of the
  * network hashrate and with a given block propagation time.
  *
  * The propagation time is a simplification: it is the time before which a miner's block has not reached
  * any other miner and after which it has reached all other miners.
  *
- * The mining process is accurately modeled: we do not pick "which miner found the next block", rather
- * each miner's time from its last block to its next is drawn from an exponential distribution parameterized
- * with the expected block interval and its share of the network hashrate. Of course, difficulty and network
- * hashrate are expected to be constant.
+ * The mining process is accurately modeled: we draw the time between the last and next block from an
+ * exponential distribution, then draw which miner found this block based on its hashrate and a uniform
+ * distribution. Difficulty and network hashrate are assumed to be constant.
  *
  * This assumes today's Bitcoin Core behaviour: a miner will mine on top of its own block immediately and will
  * only switch to a propagated chain if its longer (again, difficulty is assumed constant).
@@ -146,20 +147,33 @@ int main()
 {
     // Create a number of miners with a given set of parameters.
     std::random_device rd;
-    std::vector<Miner> miners;
-    miners.emplace_back(0, 0.1, 100ms, rd);
-    miners.emplace_back(1, 0.2, 100ms, rd);
-    miners.emplace_back(2, 0.2, 100ms, rd);
-    miners.emplace_back(3, 0.2, 100ms, rd);
-    miners.emplace_back(4, 0.3, 100ms, rd);
+    // Randomly seeded uniform distributions used to draw from the exponential distribution the time
+    // before the next block and to draw which miner found the block based on its hashrate.
+    std::mt19937 uniform_exp{rd()}, uniform_miner{rd()};
+    // An exponential distribution, representing the time between blocks.
+    std::exponential_distribution<double> block_interval{1.0 / BLOCK_INTERVAL.count()};
 
-    // Run the simulation. As we advance time, we check if any of the miners found a block and
-    // if any previously-found block reached all miners. We also check if any miner needs to reorg
-    // once one miner's chain reached it. We step by 10ms for performance reasons.
+    // Absolute time of the next block arrival. Since we are starting from 0, for the first one this is
+    // just the block interval itself.
+    std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval, uniform_exp)};
+
+    // Create our set of miners. The share of network hashrate must add up to 1.
+    std::vector<Miner> miners;
+    miners.emplace_back(0, 10, 100s, rd);
+    miners.emplace_back(1, 20, 100s, rd);
+    miners.emplace_back(2, 20, 100s, rd);
+    miners.emplace_back(3, 20, 100s, rd);
+    miners.emplace_back(4, 30, 100s, rd);
+
+    // Run the simulation. As we advance time, we check if a block was found, and if so which miner
+    // found it. We also check if any miner needs to reorg once one miner's chain reached it. We step
+    // by 10ms for performance reasons. TODO: use a faster RNG and try again with steps of 1ms.
     for (std::chrono::milliseconds cur_time{0}; ; cur_time += 10ms) {
-        // Has any miner found a block by now?
-        for (auto& miner: miners) {
-            miner.MaybeFoundBlock(cur_time);
+        // Has a block been found by now?
+        if (cur_time >= next_block_time) {
+            Miner& miner{PickFinder(miners, uniform_miner)};
+            miner.FoundBlock(next_block_time);
+            next_block_time += NextBlockInterval(block_interval, uniform_exp);
         }
 
         // Check if any miner needs to change the chain it is mining on. That is, if any other miner's
@@ -181,7 +195,7 @@ int main()
             for (const auto& miner: miners) {
                 const auto blocks_share{miner.BlocksFoundShare(cur_time)};
                 const auto stale_rate{miner.StaleRate(cur_time)};
-                std::cout << "  - Miner " << miner.id << " (" << miner.perc * 100 << "% of network hashrate) found ";
+                std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found ";
                 std::cout << blocks_share * 100 << "% of blocks. Stale rate: " << stale_rate * 100 << "%." << std::endl;
             }
             std::cout << std::endl << std::endl;
