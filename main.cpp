@@ -167,14 +167,15 @@ int main()
     miners.emplace_back(4, 30, 100s, rd);
 
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
-    // found it. We also check if any miner needs to reorg once one miner's chain reached it. We step
-    // by 10ms for performance reasons. TODO: use a faster RNG and try again with steps of 1ms.
-    for (std::chrono::milliseconds cur_time{0}; ; cur_time += 10ms) {
+    // found it. We also check if any miner needs to reorg once one miner's chain reached it.
+    for (std::chrono::milliseconds cur_time{0}; ; cur_time += 1ms) {
         // Has a block been found by now?
-        if (cur_time >= next_block_time) {
+        if (cur_time == next_block_time) {
             Miner& miner{PickFinder(miners, miner_picker)};
             miner.FoundBlock(next_block_time);
             next_block_time += NextBlockInterval(block_interval);
+        } else {
+            assert(cur_time < next_block_time); // Must not have missed one.
         }
 
         // Check if any miner needs to change the chain it is mining on. That is, if any other miner's
