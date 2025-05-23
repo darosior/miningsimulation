@@ -160,11 +160,11 @@ int main()
 
     // Create our set of miners. The share of network hashrate must add up to 1.
     std::vector<Miner> miners;
-    miners.emplace_back(0, 10, 100s, rd);
-    miners.emplace_back(1, 20, 100s, rd);
-    miners.emplace_back(2, 20, 100s, rd);
-    miners.emplace_back(3, 20, 100s, rd);
-    miners.emplace_back(4, 30, 100s, rd);
+    miners.emplace_back(0, 10, 100ms, rd);
+    miners.emplace_back(1, 20, 100ms, rd);
+    miners.emplace_back(2, 20, 100ms, rd);
+    miners.emplace_back(3, 20, 100ms, rd);
+    miners.emplace_back(4, 30, 100ms, rd);
 
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
