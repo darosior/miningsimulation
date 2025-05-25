@@ -99,19 +99,24 @@ struct Miner {
         }
     }
 
+    /** Count of published blocks found by this miner. */
+    long BlocksFound(std::chrono::milliseconds cur_time) const {
+        return std::count_if(chain.begin(), chain.end(), [&](const Block& b) {
+            return b.miner_id == id && b.arrival <= cur_time;
+        });
+    }
+
     /** Compute the share of (published) blocks found by this miner. */
     double BlocksFoundShare(std::chrono::milliseconds cur_time) const {
         size_t published_blocks{chain.size() - UnpublishedBlocks(cur_time)};
-        long found_blocks{std::count_if(chain.begin(), chain.end(), [&](const Block& b) {
-            return b.miner_id == id && b.arrival <= cur_time;
-        })};
+        long found_blocks{BlocksFound(cur_time)};
         return static_cast<double>(found_blocks) / (published_blocks - 1); // -1 for the genesis
     }
 
+    /** Proportion of stale blocks per block found by this miner. */
     double StaleRate(std::chrono::milliseconds cur_time) const {
-        long found_blocks{std::count_if(chain.begin(), chain.end(), [&](const Block& b) {
-            return b.miner_id == id && b.arrival <= cur_time;
-        })};
+        long found_blocks{BlocksFound(cur_time)};
+        if (found_blocks == 0) return 0.0;
         return static_cast<double>(stale_blocks) / found_blocks;
     }
 };
