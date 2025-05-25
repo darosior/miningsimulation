@@ -19,6 +19,8 @@ static constexpr std::chrono::milliseconds BLOCK_INTERVAL{600'000};
 static constexpr std::chrono::milliseconds PRINT_FREQ{BLOCK_INTERVAL * 144};
 //! We use integers in [0;100] for percentages. This is the multiplier to map them to [0; uint64_t::MAX].
 static constexpr uint64_t PERC_MULTIPLIER{std::numeric_limits<uint64_t>::max() / 100};
+//! Arrival time to use for unpublished blocks by a selfish miner.
+static constexpr std::chrono::milliseconds SELFISH_ARRIVAL{std::chrono::milliseconds::max()};
 
 struct Block {
     //! Which miner created this block.
@@ -51,14 +53,28 @@ struct Miner {
     std::chrono::milliseconds next_block;
     //! Number of blocks this miner created that were reorged out.
     int stale_blocks;
+    //! Whether this miner follows a (worst case) selfish mining strategy as described in section 3.2 of https://arxiv.org/pdf/1311.0243.
+    bool is_selfish;
 
-    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, std::random_device& rd)
-        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}
+    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, std::random_device& rd, bool selfish = false)
+        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}, is_selfish{selfish}
     {}
 
     /** Add a block found at the given block time to this miner's local chain. */
-    void FoundBlock(std::chrono::milliseconds block_time) {
-        chain.emplace_back(id, block_time + propagation);
+    void FoundBlock(std::chrono::milliseconds block_time, std::span<const Block> best_chain) {
+        if (is_selfish) {
+            // A selfish miner always mines on top of its private chain, except in the case of a 1-block
+            // race whereby if he wins the race he'll publish both blocks.
+            const bool is_race{SelfishBlocks() == 1 && best_chain.size() == chain.size()};
+            if (is_race) {
+                chain.back().arrival = block_time + propagation;
+                chain.emplace_back(id, block_time + propagation);
+            } else {
+                chain.emplace_back(id, SELFISH_ARRIVAL);
+            }
+        } else {
+            chain.emplace_back(id, block_time + propagation);
+        }
     }
 
     /** Count the number of not-yet-propagated blocks in this miner's local chain. */
@@ -72,6 +88,19 @@ struct Miner {
             unpublished_blocks++;
         }
         return unpublished_blocks;
+    }
+
+    /** Length of a selfish miner's private branch. Called `privateBranchLen` in the paper's algorithm. */
+    size_t SelfishBlocks() const {
+        size_t selfish_blocks{0};
+        for (const auto& block: std::views::reverse(chain)) {
+            // Selfish blocks are always ever at the end of the chain.
+            if (block.arrival != SELFISH_ARRIVAL) {
+                break;
+            }
+            ++selfish_blocks;
+        }
+        return selfish_blocks;
     }
 
     /** Get the chain from this miner, except for the block that were not yet propagated. */
@@ -97,6 +126,44 @@ struct Miner {
             }
             // else: same block at same height.
         }
+    }
+
+    /** If this miner follows the selfish mining strategy, choose whether to selectively reveal some
+     * blocks. The strategy implemented here follows the one described in the 2013 "Majority is not enough"
+     * research paper in the worst case scenario, ie Gamma=0 (in the case of a 1-block race no other miner
+     * mines on top of a selfish miner's block). Paper available at https://arxiv.org/pdf/1311.0243.
+     */
+    void MaybeSelfishReveal(std::span<const Block> best_chain, std::chrono::milliseconds cur_time) {
+        if (!is_selfish) return;
+
+        // If their chain is already longer than ours, we have to switch. The selfish blocks will be
+        // overwritten by MaybeReorg().
+        if (best_chain.size() > chain.size()) return;
+
+        // If our chain is still at least the same size, we keep mining on it. Note that even when they
+        // are the same size, we may be mining on top of a different block still in the case of a 1-block
+        // race.
+        // If they are catching up, reveal as many blocks as they have just found.
+        const size_t selfish_count{SelfishBlocks()};
+        const size_t current_lead{chain.size() - best_chain.size()};
+        if (selfish_count > current_lead) {
+            size_t reveal_count{selfish_count - current_lead};
+            // Special case: if we had a significant lead and they are almost caught up reveal everything
+            // now to avoid a race.
+            if (selfish_count > 1 && current_lead == 1) {
+                reveal_count = selfish_count;
+            }
+            // Broadcast as many blocks as necessary by setting their arrival time.
+            for (size_t i{0}; i < reveal_count; ++i) {
+                chain.at(chain.size() - selfish_count + i).arrival = cur_time + propagation;
+            }
+        }
+    }
+
+    /** Let this miner know about the longest published chain. */
+    void NotifyBestChain(std::span<const Block> best_chain, std::chrono::milliseconds cur_time) {
+        MaybeSelfishReveal(best_chain, cur_time);
+        MaybeReorg(best_chain);
     }
 
     /** Count of published blocks found by this miner. */
@@ -166,26 +233,27 @@ int main()
     // Create our set of miners. The share of network hashrate must add up to 1.
     std::vector<Miner> miners;
     miners.emplace_back(0, 10, 100ms, rd);
-    miners.emplace_back(1, 20, 100ms, rd);
-    miners.emplace_back(2, 20, 100ms, rd);
+    miners.emplace_back(1, 15, 100ms, rd);
+    miners.emplace_back(2, 15, 100ms, rd);
     miners.emplace_back(3, 20, 100ms, rd);
-    miners.emplace_back(4, 30, 100ms, rd);
+    miners.emplace_back(4, 40, 100ms, rd, true);
 
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
+    std::span<const Block> best_chain;
     for (std::chrono::milliseconds cur_time{0}; ; cur_time += 1ms) {
         // Has a block been found by now?
         if (cur_time == next_block_time) {
             Miner& miner{PickFinder(miners, miner_picker)};
-            miner.FoundBlock(next_block_time);
+            miner.FoundBlock(next_block_time, best_chain);
             next_block_time += NextBlockInterval(block_interval);
         } else {
             assert(cur_time < next_block_time); // Must not have missed one.
         }
 
-        // Check if any miner needs to change the chain it is mining on. That is, if any other miner's
-        // chain is longer and has propagated.
-        std::span<const Block> best_chain;
+        // Record the best propagated chain among all miners, and let them all know about it. They
+        // might switch to it if it's longer or act upon the information (for instance a selfish miner
+        // may selectively reveal some of its private blocks).
         for (const auto& miner: miners) {
             const auto pub_chain{miner.PublishedChain(cur_time)};
             if (pub_chain.size() > best_chain.size()) {
@@ -193,7 +261,7 @@ int main()
             }
         }
         for (auto& miner: miners) {
-            miner.MaybeReorg(best_chain);
+            miner.NotifyBestChain(best_chain, cur_time);
         }
 
         // Print some stats about each miner from time to time.
@@ -205,6 +273,7 @@ int main()
                 const auto stale_rate{miner.StaleRate(cur_time)};
                 std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found " << miner.BlocksFound(cur_time) << " blocks i.e. ";
                 std::cout << blocks_share * 100 << "% of blocks. Stale rate: " << stale_rate * 100 << "%.";
+                if (miner.is_selfish) std::cout << " ('selfish mining' strategy)";
                 std::cout << std::endl;
             }
             std::cout << std::endl << std::endl;
