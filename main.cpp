@@ -198,12 +198,14 @@ int main()
 
         // Print some stats about each miner from time to time.
         if (cur_time > 0s && cur_time % PRINT_FREQ == 0s) {
-            std::cout << "After " << std::chrono::duration_cast<std::chrono::seconds>(cur_time) << " (" << std::chrono::duration_cast<std::chrono::days>(cur_time) << "):" << std::endl;
+            const auto total_blocks{best_chain.size() - 1};
+            std::cout << "After " << std::chrono::duration_cast<std::chrono::seconds>(cur_time) << " (" << std::chrono::duration_cast<std::chrono::days>(cur_time) << ") and " << total_blocks << " blocks found:" << std::endl;
             for (const auto& miner: miners) {
                 const auto blocks_share{miner.BlocksFoundShare(cur_time)};
                 const auto stale_rate{miner.StaleRate(cur_time)};
-                std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found ";
-                std::cout << blocks_share * 100 << "% of blocks. Stale rate: " << stale_rate * 100 << "%." << std::endl;
+                std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found " << miner.BlocksFound(cur_time) << " blocks i.e. ";
+                std::cout << blocks_share * 100 << "% of blocks. Stale rate: " << stale_rate * 100 << "%.";
+                std::cout << std::endl;
             }
             std::cout << std::endl << std::endl;
         }
