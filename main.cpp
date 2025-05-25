@@ -191,7 +191,7 @@ struct Miner {
 /** Draw the time between the last and the next block from the given exponential distribution. */
 std::chrono::milliseconds NextBlockInterval(RNG& rng)
 {
-    return std::chrono::milliseconds(static_cast<long>(std::round(rng.exporand(BLOCK_INTERVAL.count())))); // FIXME: check precision
+    return std::chrono::milliseconds(static_cast<long>(std::round(rng.exporand(BLOCK_INTERVAL.count()))));
 }
 
 /** Pick which miner found the last block based on its hashrate and a uniform distribution. */
@@ -200,7 +200,7 @@ Miner& PickFinder(std::vector<Miner>& miners, RNG& rng)
     uint64_t random{rng.rand64()}, i{0};
     for (auto& miner: miners) {
         i += miner.perc * PERC_MULTIPLIER;
-        if (i >= random) return miner;
+        if (i > random) return miner;
     }
     assert(!"The miners' percentages must add up to 100.");
 }
