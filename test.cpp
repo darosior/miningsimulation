@@ -48,6 +48,7 @@ void MinerPickerSample()
     const double median{(sorted_block_counts[48] + sorted_block_counts[49]) / 2.0};
     std::cout << std::fixed << "Mean " << mean << ", std dev " << std::sqrt(variance) << ", median " << median << std::endl;
 
+    /**
     assert(block_counts.size() <= miners.size());
     std::cout << "Number of miners with different block counts: " << block_counts.size() << std::endl;
 
@@ -58,9 +59,32 @@ void MinerPickerSample()
         for (int i{0}; i < miner_count; ++i) std::cout << " *";
         std::cout << std::endl;
     }
+    */
+}
+
+// Analyze a sample of the distribution of interval between blocks. We expect the mean to be 600'000 ms on average and
+// the standard deviation to be the same as this is an exponential distribution.
+void BlockIntervalSample()
+{
+    std::random_device rd;
+    RNG rng{rd()};
+    constexpr int SAMPLE_SIZE{100'000'000};
+
+    double mean{0.0}, squared_mean{0.0};
+    for (int i{0}; i < SAMPLE_SIZE; ++i) {
+        const auto interval{static_cast<double>(NextBlockInterval(rng).count())};
+        mean += interval;
+        squared_mean += std::pow(interval, 2);
+    }
+    mean /= SAMPLE_SIZE;
+    squared_mean /= SAMPLE_SIZE;
+
+    const double variance{squared_mean - std::pow(mean, 2)};
+    std::cout << std::fixed << "Mean " << mean << " std dev " << std::sqrt(variance) << std::endl;
 }
 
 int main()
 {
-    MinerPickerSample();
+    //MinerPickerSample();
+    BlockIntervalSample();
 }
