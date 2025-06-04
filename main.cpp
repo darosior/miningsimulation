@@ -257,10 +257,11 @@ int main()
         // might switch to it if it's longer or act upon the information (for instance a selfish miner
         // may selectively reveal some of its private blocks). Among chains of the same size, pick
         // the one which arrived first (matching Bitcoin Core's first-seen rule).
+        std::span<const Block> best_chain;
         for (const auto& miner: miners) {
             const auto pub_chain{miner.PublishedChain(cur_time)};
             const bool more_work{pub_chain.size() > best_chain.size()};
-            const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && !best_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
+            const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
             if (more_work || first_seen) {
                 best_chain = pub_chain;
             }
