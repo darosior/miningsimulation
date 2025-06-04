@@ -2,7 +2,6 @@
 #include <cassert>
 #include <chrono>
 #include <optional>
-#include <iostream>
 #include <limits>
 #include <memory>
 #include <random>

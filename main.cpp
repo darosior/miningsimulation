@@ -1,3 +1,5 @@
+#include <iostream>
+
 #include "simulation.h"
 
 /** Simulate the Bitcoin mining process with a given number of miners, each with a given share of the
