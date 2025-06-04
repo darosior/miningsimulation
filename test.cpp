@@ -21,9 +21,9 @@ void MinerPickerSample()
     std::vector<Miner> miners;
     for (int i{0}; i < 100; ++i) {
         miners.emplace_back(i, 1, 0s);
+        miners.back().chain.pop_back(); // drop the genesis block
         miners.back().chain.reserve((TOTAL_BLOCK_COUNT + 99) / 100);
     }
-    assert(miners.size() == 100);
 
     for (int i{0}; i < TOTAL_BLOCK_COUNT; ++i) {
         auto& miner{PickFinder(miners, rng)};
@@ -62,6 +62,62 @@ void MinerPickerSample()
     */
 }
 
+// Analyze the sample mean for many sample drawn from the distribution of blocks with miners with
+// different hashrate. This is to make sure the way we sample from the distribution is not skewed
+// with hashrate somehow.
+void MinerPickerSmallBig()
+{
+    std::random_device rd;
+    RNG rng{rd()};
+    constexpr int SAMPLE_COUNT{10'000};
+    constexpr int SAMPLE_SIZE{1'000};
+    constexpr int TOTAL_BLOCK_COUNT{100};
+
+    std::vector<Miner> miners;
+    miners.emplace_back(0, 12, 0s);
+    miners.emplace_back(1, 18, 0s);
+    miners.emplace_back(2, 20, 0s);
+    miners.emplace_back(3, 15, 0s);
+    miners.emplace_back(4, 35, 0s);
+    for (auto& miner: miners) {
+        miner.chain.reserve((TOTAL_BLOCK_COUNT + 99) / 100);
+        miner.chain.pop_back(); // drop the genesis block
+    }
+
+    std::vector<double> sample_means(miners.size()), sample_squared_means(miners.size());
+    for (int k{0}; k < SAMPLE_COUNT; ++k) {
+        std::vector<double> means(miners.size());
+        for (int j{0}; j < SAMPLE_SIZE; ++j) {
+            for (int i{0}; i < TOTAL_BLOCK_COUNT; ++i) {
+                auto& miner{PickFinder(miners, rng)};
+                miner.FoundBlock(0ms, 0);
+            }
+
+            for (size_t i{0}; i < miners.size(); ++i) {
+                const auto block_count{miners[i].chain.size()};
+                means[i] += block_count;
+                miners[i].chain.clear();
+            }
+        }
+
+        for (size_t i{0}; i < miners.size(); ++i) {
+            means[i] /= SAMPLE_SIZE;
+            sample_means[i] += means[i];
+            sample_squared_means[i] += std::pow(means[i], 2);
+        }
+    }
+
+    for (size_t i{0}; i < miners.size(); ++i) {
+        sample_means[i] /= SAMPLE_COUNT;
+        const auto sample_mean_perc{sample_means[i] / TOTAL_BLOCK_COUNT * 100};
+        sample_squared_means[i] /= SAMPLE_COUNT;
+        const double std_dev{std::sqrt(sample_squared_means[i] - std::pow(sample_means[i], 2))};
+        const double std_dev_perc{std_dev / TOTAL_BLOCK_COUNT * 100};
+        std::cout << std::fixed << "Miner " << miners[i].id << " with " << miners[i].perc << "% of the hashrate: ";
+        std::cout << std::fixed << "sample mean " << sample_means[i] << " (" << sample_mean_perc << "%), std dev of sample mean " << std_dev << " (" << std_dev_perc << "%)" << std::endl;
+    }
+}
+
 // Analyze a sample of the distribution of interval between blocks. We expect the mean to be 600'000 ms on average and
 // the standard deviation to be the same as this is an exponential distribution.
 void BlockIntervalSample()
@@ -86,5 +142,6 @@ void BlockIntervalSample()
 int main()
 {
     //MinerPickerSample();
-    BlockIntervalSample();
+    //BlockIntervalSample();
+    MinerPickerSmallBig();
 }
