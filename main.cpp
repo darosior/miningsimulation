@@ -14,9 +14,9 @@
 using namespace std::chrono_literals;
 
 //! Expected time between blocks. Used as parameter for the exponential distribution we are sampling from.
-static constexpr std::chrono::milliseconds BLOCK_INTERVAL{600'000};
+static constexpr std::chrono::seconds BLOCK_INTERVAL{600};
 //! How often to print statistics.
-static constexpr std::chrono::milliseconds PRINT_FREQ{BLOCK_INTERVAL * 144};
+static constexpr std::chrono::seconds PRINT_FREQ{BLOCK_INTERVAL * 144};
 //! We use integers in [0;100] for percentages. This is the multiplier to map them to [0; uint64_t::MAX].
 static constexpr uint64_t PERC_MULTIPLIER{std::numeric_limits<uint64_t>::max() / 100};
 //! Arrival time to use for unpublished blocks by a selfish miner.
@@ -191,9 +191,9 @@ struct Miner {
 /** Draw the time between the last and the next block from the given exponential distribution. */
 std::chrono::milliseconds NextBlockInterval(RNG& rng)
 {
-    const double exporand{std::round(rng.exporand(BLOCK_INTERVAL.count()))};
+    const auto exporand{std::llround(rng.exporand(std::chrono::nanoseconds(BLOCK_INTERVAL).count()))};
     assert(exporand >= 0.0); // Must not go backward.
-    return std::chrono::milliseconds(static_cast<long>(exporand));
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::nanoseconds(exporand));
 }
 
 /** Pick which miner found the last block based on its hashrate and a uniform distribution. */
