@@ -9,10 +9,10 @@ The time between blocks is drawn from an exponential distribution with mean 600 
 found the last block is drawn randomly based on each miner's proportion of the network hashrate.
 
 One goal of this simulation is to be simple yet close to reality. The simplified block propagation
-modeling is an example of that. I do intend to extend it in the future by implementing a simple
-selfish mining strategy (only in the worst case i.e. $\gamma = 0$ according to the 2013 paper).
+modeling is an example of that. It also implements only the worst-case selfish mining strategy (no
+Sybil, i.e. $\gamma = 0$ according to the 2013 paper).
 
-Thanks to Clara Shikhelman for suggesting a "more obviously correct" way of drawing block interval
+Thanks to Clara Shikhelman for suggesting a "more obviously correct" way of drawing block intervals
 and attributions. Thanks to Pieter Wuille for suggesting to use and providing the code for a faster
 RNG than the default one from the STL.
 
