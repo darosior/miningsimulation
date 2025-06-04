@@ -102,3 +102,7 @@ After 31536000s (365d) and 35224 blocks found:
   - Miner 3 (20% of network hashrate) found 6183 blocks i.e. 17.5534% of blocks. Stale rate: 68.3972%.
   - Miner 4 (40% of network hashrate) found 16473 blocks i.e. 46.7664% of blocks. Stale rate: 27.9427%. ('selfish mining' strategy)
 ```
+
+# Unit tests
+
+Some very basic unit tests are present in [`test.cpp`](test.cpp). This file requires C++23 and libc++ to compile at the moment.
