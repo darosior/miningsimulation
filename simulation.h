@@ -14,8 +14,6 @@ using namespace std::chrono_literals;
 
 //! Expected time between blocks. Used as parameter for the exponential distribution we are sampling from.
 static constexpr std::chrono::seconds BLOCK_INTERVAL{600};
-//! How often to print statistics.
-static constexpr std::chrono::seconds PRINT_FREQ{BLOCK_INTERVAL * 144};
 //! We use integers in [0;100] for percentages. This is the multiplier to map them to [0; uint64_t::MAX].
 static constexpr uint64_t PERC_MULTIPLIER{std::numeric_limits<uint64_t>::max() / 100};
 //! Arrival time to use for unpublished blocks by a selfish miner.

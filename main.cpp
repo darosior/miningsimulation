@@ -2,6 +2,9 @@
 
 #include "simulation.h"
 
+//! How often to print statistics.
+static constexpr std::chrono::seconds PRINT_FREQ{BLOCK_INTERVAL * 144};
+
 /** Simulate the Bitcoin mining process with a given number of miners, each with a given share of the
  * network hashrate and with a given block propagation time.
  *
