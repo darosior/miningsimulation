@@ -191,7 +191,9 @@ struct Miner {
 /** Draw the time between the last and the next block from the given exponential distribution. */
 std::chrono::milliseconds NextBlockInterval(RNG& rng)
 {
-    return std::chrono::milliseconds(static_cast<long>(std::round(rng.exporand(BLOCK_INTERVAL.count()))));
+    const double exporand{std::round(rng.exporand(BLOCK_INTERVAL.count()))};
+    assert(exporand >= 0.0); // Must not go backward.
+    return std::chrono::milliseconds(static_cast<long>(exporand));
 }
 
 /** Pick which miner found the last block based on its hashrate and a uniform distribution. */
@@ -242,14 +244,14 @@ int main()
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
     std::span<const Block> best_chain;
     for (std::chrono::milliseconds cur_time{0}; ; cur_time += 1ms) {
-        // Has a block been found by now?
-        if (cur_time == next_block_time) {
+        // Has a block been found by now? NOTE: `while` and not `if` in the unlikely case that
+        // NextBlockInterval() returns 0.
+        while (cur_time == next_block_time) {
             Miner& miner{PickFinder(miners, miner_picker)};
             miner.FoundBlock(next_block_time, best_chain);
             next_block_time += NextBlockInterval(block_interval);
-        } else {
-            assert(cur_time < next_block_time); // Must not have missed one.
         }
+        assert(cur_time < next_block_time); // Must never miss any as we advance in steps of 1ms.
 
         // Record the best propagated chain among all miners, and let them all know about it. They
         // might switch to it if it's longer or act upon the information (for instance a selfish miner
