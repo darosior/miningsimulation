@@ -61,11 +61,11 @@ struct Miner {
     {}
 
     /** Add a block found at the given block time to this miner's local chain. */
-    void FoundBlock(std::chrono::milliseconds block_time, std::span<const Block> best_chain) {
+    void FoundBlock(std::chrono::milliseconds block_time, size_t best_chain_size) {
         if (is_selfish) {
             // A selfish miner always mines on top of its private chain, except in the case of a 1-block
             // race whereby if he wins the race he'll publish both blocks.
-            const bool is_race{SelfishBlocks() == 1 && best_chain.size() == chain.size()};
+            const bool is_race{SelfishBlocks() == 1 && best_chain_size == chain.size()};
             if (is_race) {
                 chain.back().arrival = block_time + propagation;
                 chain.emplace_back(id, block_time + propagation);
@@ -242,13 +242,13 @@ int main()
 
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
-    std::span<const Block> best_chain;
+    size_t best_chain_size{1};
     for (std::chrono::milliseconds cur_time{0}; ; cur_time += 1ms) {
         // Has a block been found by now? NOTE: `while` and not `if` in the unlikely case that
         // NextBlockInterval() returns 0.
         while (cur_time == next_block_time) {
             Miner& miner{PickFinder(miners, miner_picker)};
-            miner.FoundBlock(next_block_time, best_chain);
+            miner.FoundBlock(next_block_time, best_chain_size);
             next_block_time += NextBlockInterval(block_interval);
         }
         assert(cur_time < next_block_time); // Must never miss any as we advance in steps of 1ms.
@@ -269,6 +269,10 @@ int main()
         for (auto& miner: miners) {
             miner.NotifyBestChain(best_chain, cur_time);
         }
+
+        // Record the best chain size as FoundBlock() may decide not to publish a block based on this
+        // information.
+        best_chain_size = best_chain.size();
 
         // Print some stats about each miner from time to time.
         if (cur_time > 0s && cur_time % PRINT_FREQ == 0s) {
