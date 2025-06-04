@@ -56,7 +56,7 @@ struct Miner {
     //! Whether this miner follows a (worst case) selfish mining strategy as described in section 3.2 of https://arxiv.org/pdf/1311.0243.
     bool is_selfish;
 
-    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, std::random_device& rd, bool selfish = false)
+    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, bool selfish = false)
         : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}, is_selfish{selfish}
     {}
 
