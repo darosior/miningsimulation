@@ -118,6 +118,74 @@ void MinerPickerSmallBig()
     }
 }
 
+/* Run the simulation from main.cpp 100 times for two weeks. Take a 100 such samples. Compute the sample mean of the distribution of blocks found per miner. */
+void SimpleSim()
+{
+    constexpr int SAMPLE_COUNT{100};
+    constexpr int SAMPLE_SIZE{100};
+    static constexpr std::chrono::milliseconds SIM_DURATION{BLOCK_INTERVAL * 144 * 14};
+
+    std::vector<Miner> miners;
+    miners.emplace_back(0, 12, 0s);
+    miners.emplace_back(1, 18, 0s);
+    miners.emplace_back(2, 20, 0s);
+    miners.emplace_back(3, 15, 0s);
+    miners.emplace_back(4, 35, 0s);
+
+    std::vector<double> sample_means(miners.size()), sample_squared_means(miners.size());
+    for (int counter1{0}; counter1 < SAMPLE_COUNT; ++counter1) {
+        std::vector<double> means(miners.size());
+        for (int counter2{0}; counter2 < SAMPLE_SIZE; ++counter2) {
+            // Reproduce a simplified version of the simulation in main.cpp. No selfish mining and steps of 1s.
+            std::random_device rd;
+            RNG block_interval{rd()}, miner_picker{rd()};
+            std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval)};
+            for (std::chrono::milliseconds cur_time{0}; cur_time < SIM_DURATION; cur_time += 1s) {
+                while (cur_time >= next_block_time) {
+                    Miner& miner{PickFinder(miners, miner_picker)};
+                    miner.FoundBlock(next_block_time, /*best_chain_size=*/0); // best chain size 0 since no selfish mining
+                    next_block_time += NextBlockInterval(block_interval);
+                }
+
+                std::span<const Block> best_chain;
+                for (const auto& miner: miners) {
+                    const auto pub_chain{miner.PublishedChain(cur_time)};
+                    const bool more_work{pub_chain.size() > best_chain.size()};
+                    const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
+                    if (more_work || first_seen) {
+                        best_chain = pub_chain;
+                    }
+                }
+                for (auto& miner: miners) {
+                    miner.NotifyBestChain(best_chain, cur_time);
+                }
+            }
+
+            for (size_t i{0}; i < miners.size(); ++i) {
+                means[i] += miners[i].BlocksFoundShare(SIM_DURATION);
+                miners[i].chain.clear();
+            }
+        }
+
+        for (size_t i{0}; i < miners.size(); ++i) {
+            means[i] /= SAMPLE_SIZE;
+            sample_means[i] += means[i];
+            sample_squared_means[i] += std::pow(means[i], 2);
+        }
+
+        // Show some progress as the runtime is still pretty long
+        std::cout << counter1 * 100 / SAMPLE_COUNT << "%" << "\r" << std::flush;
+    }
+
+    for (size_t i{0}; i < miners.size(); ++i) {
+        sample_means[i] /= SAMPLE_COUNT;
+        sample_squared_means[i] /= SAMPLE_COUNT;
+        const double std_dev{std::sqrt(sample_squared_means[i] - std::pow(sample_means[i], 2))};
+        std::cout << std::fixed << "Miner " << miners[i].id << " with " << miners[i].perc << "% of the hashrate: ";
+        std::cout << std::fixed << "sample mean " << sample_means[i] * 100 << " std dev of sample mean " << std_dev * 100 << std::endl;
+    }
+}
+
 // Analyze a sample of the distribution of interval between blocks. We expect the mean to be 600'000 ms on average and
 // the standard deviation to be the same as this is an exponential distribution.
 void BlockIntervalSample()
@@ -143,5 +211,6 @@ int main()
 {
     //MinerPickerSample();
     //BlockIntervalSample();
-    MinerPickerSmallBig();
+    //MinerPickerSmallBig();
+    SimpleSim();
 }
