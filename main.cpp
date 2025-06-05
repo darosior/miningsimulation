@@ -5,6 +5,27 @@
 //! How often to print statistics.
 static constexpr std::chrono::seconds PRINT_FREQ{BLOCK_INTERVAL * 144};
 
+/** Statistics about a miner's revenue in function of the best chain. */
+struct MinerStats {
+    //! The count of blocks found by this miner in the best chain.
+    long blocks_found;
+    //! The ratio of blocks found by this miner in the best chain.
+    double blocks_share;
+    //! The ratio of blocks found in the best chain over stale blocks for this miner.
+    double stale_rate;
+
+    /** Compute revenue statistics for this miner in the given best chain. */
+    explicit MinerStats(const Miner& miner, std::span<const Block> best_chain)
+    {
+        blocks_found = std::count_if(best_chain.begin(), best_chain.end(), [&miner](const Block& b) {
+            return b.miner_id == miner.id;
+        });
+        // -1 for the genesis block.
+        blocks_share = blocks_found == 0 ? 0.0 : static_cast<double>(blocks_found) / (best_chain.size() - 1);
+        stale_rate = blocks_found == 0 ? 0.0 : static_cast<double>(miner.stale_blocks) / blocks_found;
+    }
+};
+
 /** Simulate the Bitcoin mining process with a given number of miners, each with a given share of the
  * network hashrate and with a given block propagation time.
  *
@@ -74,13 +95,14 @@ int main()
 
         // Print some stats about each miner from time to time.
         if (cur_time > 0s && cur_time % PRINT_FREQ == 0s) {
+            const auto sec{std::chrono::duration_cast<std::chrono::seconds>(cur_time)};
+            const auto days{std::chrono::duration_cast<std::chrono::days>(cur_time)};
             const auto total_blocks{best_chain.size() - 1};
-            std::cout << "After " << std::chrono::duration_cast<std::chrono::seconds>(cur_time) << " (" << std::chrono::duration_cast<std::chrono::days>(cur_time) << ") and " << total_blocks << " blocks found:" << std::endl;
+            std::cout << "After " << sec << " (" << days << ") and " << total_blocks << " blocks found:" << std::endl;
             for (const auto& miner: miners) {
-                const auto blocks_share{miner.BlocksFoundShare(cur_time)};
-                const auto stale_rate{miner.StaleRate(cur_time)};
-                std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found " << miner.BlocksFound(cur_time) << " blocks i.e. ";
-                std::cout << blocks_share * 100 << "% of blocks. Stale rate: " << stale_rate * 100 << "%.";
+                const auto stats{MinerStats(miner, best_chain)};
+                std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found " << stats.blocks_found << " blocks i.e. ";
+                std::cout << stats.blocks_share * 100 << "% of blocks. Stale rate: " << stats.stale_rate * 100 << "%.";
                 if (miner.is_selfish) std::cout << " ('selfish mining' strategy)";
                 std::cout << std::endl;
             }
