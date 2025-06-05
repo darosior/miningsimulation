@@ -32,7 +32,7 @@ struct Block {
         return Block(std::numeric_limits<unsigned>::max(), 0s);
     }
 
-    bool operator==(const Block& other) {
+    bool operator==(const Block& other) const {
         return miner_id == other.miner_id && arrival == other.arrival;
     }
 };
