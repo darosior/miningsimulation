@@ -203,3 +203,13 @@ Miner& PickFinder(std::vector<Miner>& miners, RNG& rng)
     }
     assert(!"The miners' percentages must add up to 100.");
 }
+
+/** Utility function useful in tests or for debugging. */
+void PrintChain(const Miner& miner)
+{
+    std::cout << "Miner " << miner.id << " chain: ";
+    for (const auto&b : miner.chain) {
+        std::cout << "(" << b.miner_id << ", " << b.arrival << "), ";
+    }
+    std::cout << std::endl;
+}

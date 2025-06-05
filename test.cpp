@@ -207,15 +207,6 @@ void BlockIntervalSample()
     std::cout << std::fixed << "Mean " << mean << " std dev " << std::sqrt(variance) << std::endl;
 }
 
-void PrintChain(const Miner& miner)
-{
-    std::cout << "Miner " << miner.id << " chain: ";
-    for (const auto&b : miner.chain) {
-        std::cout << "(" << b.miner_id << ", " << b.arrival << "), ";
-    }
-    std::cout << std::endl;
-}
-
 /** Test our implementation of the "worst case" (gamma=0) selfish mining strategy. This goes over all the possible state in
  * model presented in section 4.2 of the 2013 paper. We also exercise some scenarii not present in the 2013 paper's model.
  */
