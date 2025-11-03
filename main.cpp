@@ -26,6 +26,30 @@ struct MinerStats {
     }
 };
 
+/** Set the hashrate distribution for the simulation. Must add up to 1. */
+std::vector<Miner> SetupMiners()
+{
+    std::vector<Miner> miners;
+
+    // Use hashrate data from https://mainnet.observer/charts/mining-pools-hashrate-distribution.
+    // Assume homogenous propagation time (optimistic, as bigger pools are more likely to be better
+    // connected). We choose the propagation time according to historical data from
+    // https://www.dsn.kastel.kit.edu/bitcoin. For the deteriorated propagation case we choose 20s
+    // (probably on the pessimistic end).
+    miners.emplace_back(0, 30, 20s); // Antpool & co.
+    miners.emplace_back(1, 29, 20s); // Foundry.
+    miners.emplace_back(2, 12, 20s); // ViaBTC.
+    miners.emplace_back(3, 11, 20s); // F2pool.
+    miners.emplace_back(4, 8, 20s); // Spider.
+    miners.emplace_back(5, 5, 20s); // Mara.
+    miners.emplace_back(6, 3, 20s); // Secpool.
+    // Some made-up small miners
+    miners.emplace_back(7, 1, 20s);
+    miners.emplace_back(8, 1, 20s);
+
+    return miners;
+}
+
 /** Simulate the Bitcoin mining process with a given number of miners, each with a given share of the
  * network hashrate and with a given block propagation time.
  *
@@ -51,13 +75,8 @@ int main()
     // just the block interval itself.
     std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval)};
 
-    // Create our set of miners. The share of network hashrate must add up to 1.
-    std::vector<Miner> miners;
-    miners.emplace_back(0, 10, 100ms);
-    miners.emplace_back(1, 15, 100ms);
-    miners.emplace_back(2, 15, 100ms);
-    miners.emplace_back(3, 20, 100ms);
-    miners.emplace_back(4, 40, 100ms, true);
+    // Set the hashrate distribution for the simulation.
+    auto miners{SetupMiners()};
 
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
