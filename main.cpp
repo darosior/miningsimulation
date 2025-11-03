@@ -3,7 +3,7 @@
 #include "simulation.h"
 
 //! How often to print statistics.
-static constexpr std::chrono::seconds PRINT_FREQ{BLOCK_INTERVAL * 144};
+static constexpr std::chrono::seconds PRINT_INTERVAL{BLOCK_INTERVAL * 144};
 
 /** Statistics about a miner's revenue in function of the best chain. */
 struct MinerStats {
@@ -94,7 +94,7 @@ int main()
         best_chain_size = best_chain.size();
 
         // Print some stats about each miner from time to time.
-        if (cur_time > 0s && cur_time % PRINT_FREQ == 0s) {
+        if (cur_time > 0s && cur_time % PRINT_INTERVAL == 0s) {
             const auto sec{std::chrono::duration_cast<std::chrono::seconds>(cur_time)};
             const auto days{std::chrono::duration_cast<std::chrono::days>(cur_time)};
             const auto total_blocks{best_chain.size() - 1};
