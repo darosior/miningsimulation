@@ -1,4 +1,5 @@
 #include <iostream>
+#include <future>
 
 #include "simulation.h"
 
@@ -6,10 +7,10 @@
 static constexpr std::chrono::seconds PRINT_INTERVAL{BLOCK_INTERVAL * 144};
 
 //! How long to run each simulation for.
-static constexpr std::chrono::months SIM_DURATION{1};
+static constexpr std::chrono::months SIM_DURATION{6};
 
-//! How many simulations to run.
-static constexpr int SIM_RUNS{6};
+//! How many simulations to run in parallel.
+static constexpr int SIM_RUNS{16};
 
 /** Statistics about a miner's revenue in function of the best chain. */
 struct MinerStats {
@@ -151,15 +152,22 @@ int main()
     const auto miners{SetupMiners()};
     std::vector<MinerStats> stats_total(miners.size());
 
+    std::cout << "Running " << SIM_RUNS << " simulations in parallel using at most " << std::thread::hardware_concurrency() << " threads." << std::endl;
+
+    std::vector<std::future<std::vector<MinerStats>>> sim_futures;
     for (int i{0}; i < SIM_RUNS; ++i) {
-        const auto stats{RunSimulation(SIM_DURATION, miners)};
+        sim_futures.emplace_back(std::async(std::launch::async, &RunSimulation, SIM_DURATION, miners));
+    }
+    for (auto& fut: sim_futures) {
+        const auto stats{fut.get()};
         assert(stats.size() == stats_total.size());
         for (int j{0}; j < stats.size(); ++j) {
             stats_total[j] += stats[j];
         }
     }
 
-    std::cout << "After running " << SIM_RUNS << " simulations for " << SIM_DURATION << " each, on average:" << std::endl;
+    const auto days{std::chrono::duration_cast<std::chrono::days>(SIM_DURATION)};
+    std::cout << "After running " << SIM_RUNS << " simulations for " << days << " each, on average:" << std::endl;
     assert(miners.size() == stats_total.size());
     for (int i{0}; i < miners.size(); ++i) {
         const auto& miner{miners[i]};
