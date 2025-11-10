@@ -5,6 +5,12 @@
 //! How often to print statistics.
 static constexpr std::chrono::seconds PRINT_INTERVAL{BLOCK_INTERVAL * 144};
 
+//! How long to run each simulation for.
+static constexpr std::chrono::months SIM_DURATION{1};
+
+//! How many simulations to run.
+static constexpr int SIM_RUNS{6};
+
 /** Statistics about a miner's revenue in function of the best chain. */
 struct MinerStats {
     //! The count of blocks found by this miner in the best chain.
@@ -23,6 +29,16 @@ struct MinerStats {
         // -1 for the genesis block.
         blocks_share = blocks_found == 0 ? 0.0 : static_cast<double>(blocks_found) / (best_chain.size() - 1);
         stale_rate = blocks_found == 0 ? 0.0 : static_cast<double>(miner.stale_blocks) / blocks_found;
+    }
+
+    explicit MinerStats(): blocks_found{0}, blocks_share{0.0}, stale_rate{0.0} {}
+
+    MinerStats& operator+=(const MinerStats& other)
+    {
+        blocks_found += other.blocks_found;
+        blocks_share += other.blocks_share;
+        stale_rate += other.stale_rate;
+        return *this;
     }
 };
 
@@ -50,8 +66,25 @@ std::vector<Miner> SetupMiners()
     return miners;
 }
 
-/** Simulate the Bitcoin mining process with a given number of miners, each with a given share of the
- * network hashrate and with a given block propagation time.
+/** Get the best chain known by any miner. */
+std::span<const Block> BestChain(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
+{
+    std::span<const Block> best_chain;
+
+    for (const auto& miner: miners) {
+        const auto pub_chain{miner.PublishedChain(cur_time)};
+        const bool more_work{pub_chain.size() > best_chain.size()};
+        const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
+        if (more_work || first_seen) {
+            best_chain = pub_chain;
+        }
+    }
+
+    return best_chain;
+}
+
+/** Simulate the Bitcoin mining process for a given amount of time with the given miners, each having its
+ * own share of network hashrate and block propagation time.
  *
  * The propagation time is a simplification: it is the time before which a miner's block has not reached
  * any other miner and after which it has reached all other miners.
@@ -61,9 +94,10 @@ std::vector<Miner> SetupMiners()
  * distribution. Difficulty and network hashrate are assumed to be constant.
  *
  * This assumes today's Bitcoin Core behaviour: a miner will mine on top of its own block immediately and will
- * only switch to a propagated chain if its longer (again, difficulty is assumed constant).
+ * only switch to a propagated chain if it's longer (again, difficulty is assumed constant). Miners can optionally
+ * be set to adopt the "selfish mining" strategy in SetupMiners().
  */
-int main()
+std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, std::vector<Miner> miners)
 {
     // Create a number of miners with a given set of parameters.
     std::random_device rd;
@@ -75,13 +109,10 @@ int main()
     // just the block interval itself.
     std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval)};
 
-    // Set the hashrate distribution for the simulation.
-    auto miners{SetupMiners()};
-
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
     size_t best_chain_size{1};
-    for (std::chrono::milliseconds cur_time{0}; ; cur_time += 1ms) {
+    for (std::chrono::milliseconds cur_time{0}; cur_time < duration_time; cur_time += 1ms) {
         // Has a block been found by now? NOTE: `while` and not `if` in the unlikely case that
         // NextBlockInterval() returns 0.
         while (cur_time == next_block_time) {
@@ -95,15 +126,7 @@ int main()
         // might switch to it if it's longer or act upon the information (for instance a selfish miner
         // may selectively reveal some of its private blocks). Among chains of the same size, pick
         // the one which arrived first (matching Bitcoin Core's first-seen rule).
-        std::span<const Block> best_chain;
-        for (const auto& miner: miners) {
-            const auto pub_chain{miner.PublishedChain(cur_time)};
-            const bool more_work{pub_chain.size() > best_chain.size()};
-            const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
-            if (more_work || first_seen) {
-                best_chain = pub_chain;
-            }
-        }
+        const auto best_chain{BestChain(miners, cur_time)};
         for (auto& miner: miners) {
             miner.NotifyBestChain(best_chain, cur_time);
         }
@@ -111,21 +134,39 @@ int main()
         // Record the best chain size as FoundBlock() may decide not to publish a block based on this
         // information.
         best_chain_size = best_chain.size();
+    }
 
-        // Print some stats about each miner from time to time.
-        if (cur_time > 0s && cur_time % PRINT_INTERVAL == 0s) {
-            const auto sec{std::chrono::duration_cast<std::chrono::seconds>(cur_time)};
-            const auto days{std::chrono::duration_cast<std::chrono::days>(cur_time)};
-            const auto total_blocks{best_chain.size() - 1};
-            std::cout << "After " << sec << " (" << days << ") and " << total_blocks << " blocks found:" << std::endl;
-            for (const auto& miner: miners) {
-                const auto stats{MinerStats(miner, best_chain)};
-                std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found " << stats.blocks_found << " blocks i.e. ";
-                std::cout << stats.blocks_share * 100 << "% of blocks. Stale rate: " << stats.stale_rate * 100 << "%.";
-                if (miner.is_selfish) std::cout << " ('selfish mining' strategy)";
-                std::cout << std::endl;
-            }
-            std::cout << std::endl << std::endl;
+    const auto best_chain{BestChain(miners, duration_time)};
+    std::vector<MinerStats> stats;
+    for (const auto& miner: miners) {
+        stats.emplace_back(MinerStats(miner, best_chain));
+    }
+
+    return stats;
+}
+
+/** Run the simulation SIM_RUNS times for SIM_DURATION with the network configuration defined in SetupMiners(). */
+int main()
+{
+    const auto miners{SetupMiners()};
+    std::vector<MinerStats> stats_total(miners.size());
+
+    for (int i{0}; i < SIM_RUNS; ++i) {
+        const auto stats{RunSimulation(SIM_DURATION, miners)};
+        assert(stats.size() == stats_total.size());
+        for (int j{0}; j < stats.size(); ++j) {
+            stats_total[j] += stats[j];
         }
+    }
+
+    std::cout << "After running " << SIM_RUNS << " simulations for " << SIM_DURATION << " each, on average:" << std::endl;
+    assert(miners.size() == stats_total.size());
+    for (int i{0}; i < miners.size(); ++i) {
+        const auto& miner{miners[i]};
+        const auto& stats{stats_total[i]};
+        std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found " << stats.blocks_found / SIM_RUNS << " blocks i.e. ";
+        std::cout << stats.blocks_share * 100 / SIM_RUNS << "% of blocks. Stale rate: " << stats.stale_rate * 100 / SIM_RUNS << "%.";
+        if (miner.is_selfish) std::cout << " ('selfish mining' strategy)";
+        std::cout << std::endl;
     }
 }
