@@ -96,7 +96,7 @@ def plot_benefits(prop_times):
         rates_perc = [rate * 100 for rate in benefits[name]]
         ax.plot(prop_times, rates_perc, label=name)
     ax.set_xlabel("Propagation time (seconds)")
-    ax.set_ylabel("Net benefit (% change in blocks found)")
+    ax.set_ylabel("Change in share of network hashrate controlled (%)")
     ax.legend()
 
     plt.show()
