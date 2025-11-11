@@ -7,10 +7,10 @@
 static constexpr std::chrono::seconds PRINT_INTERVAL{BLOCK_INTERVAL * 144};
 
 //! How long to run each simulation for.
-static constexpr std::chrono::months SIM_DURATION{6};
+static constexpr std::chrono::months SIM_DURATION{12};
 
 //! How many simulations to run in parallel.
-static constexpr int SIM_RUNS{16};
+static constexpr int SIM_RUNS{16 * 2'048};
 
 /** Statistics about a miner's revenue in function of the best chain. */
 struct MinerStats {
@@ -185,22 +185,32 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
 int main()
 {
     const auto miners{SetupMiners()};
+    const auto thread_count{std::thread::hardware_concurrency()};
     std::vector<MinerStats> stats_total(miners.size());
 
-    std::cout << "Running " << SIM_RUNS << " simulations in parallel using at most " << std::thread::hardware_concurrency() << " threads." << std::endl;
+    std::cout << "Running " << SIM_RUNS << " simulations in parallel using " << thread_count << " threads." << std::endl;
 
-    std::vector<std::future<std::vector<MinerStats>>> sim_futures;
-    for (int i{0}; i < SIM_RUNS; ++i) {
-        sim_futures.emplace_back(std::async(std::launch::async, &RunSimulation, SIM_DURATION, miners));
-    }
-    for (auto& fut: sim_futures) {
-        const auto stats{fut.get()};
-        assert(stats.size() == stats_total.size());
-        for (int j{0}; j < stats.size(); ++j) {
-            stats_total[j] += stats[j];
+    // Run the simulation `SIM_RUNS` times by batches of `thread_count` parallel tasks. Record all stats
+    // into `stats_total`.
+    unsigned int remaining_tasks{SIM_RUNS};
+    while (remaining_tasks > 0) {
+        std::vector<std::future<std::vector<MinerStats>>> sim_futures;
+        for (int i{0}; i < std::min(thread_count, remaining_tasks); ++i) {
+            sim_futures.emplace_back(std::async(std::launch::async, &RunSimulation, SIM_DURATION, miners));
         }
+        for (auto& fut: sim_futures) {
+            const auto stats{fut.get()};
+            assert(stats.size() == stats_total.size());
+            for (int j{0}; j < stats.size(); ++j) {
+                stats_total[j] += stats[j];
+            }
+        }
+        remaining_tasks -= thread_count;
+        std::cout << '\r' << (SIM_RUNS - remaining_tasks) * 100 / SIM_RUNS << "% progress..";
     }
+    std::cout << std::endl;
 
+    // Print the stats for each miner by averaging over all simulation runs.
     const auto days{std::chrono::duration_cast<std::chrono::days>(SIM_DURATION)};
     std::cout << "After running " << SIM_RUNS << " simulations for " << days << " each, on average:" << std::endl;
     assert(miners.size() == stats_total.size());
