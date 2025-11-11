@@ -33,6 +33,7 @@ struct Block {
     }
 
     bool operator==(const Block& other) const {
+        // FIXME: should we have a block uid for when a single miner finds two blocks in a row with the same timestamp?
         return miner_id == other.miner_id && arrival == other.arrival;
     }
 };
@@ -111,17 +112,19 @@ struct Miner {
         // Of course we assume all blocks are at the same difficulty.
         if (best_chain.size() <= chain.size()) return;
 
-        // It's really only the last couple of blocks that may ever change, so try
-        // to be smart and don't wipe and reallocate the whole vector every time.
-        for (size_t i{0}; i < best_chain.size(); ++i) {
-            if (i > chain.size() - 1) {
-                chain.push_back(best_chain[i]);
-            } else if (chain[i] != best_chain[i]) {
-                // This block was reorged out. If it's ours, update the stale block counter.
-                if (chain[i].miner_id == id) stale_blocks++;
-                chain[i] = best_chain[i];
+        // Find the point of agreement between the two chains.
+        for (size_t i{chain.size()}; i > 0; --i) {
+            if (chain.back() == best_chain[i - 1]) {
+                break;
             }
-            // else: same block at same height.
+            if (chain.back().miner_id == id) stale_blocks++;
+            chain.pop_back();
+        }
+
+        // Adopt the best chain.
+        assert(best_chain.size() > chain.size()); // Checked above.
+        for (size_t i{chain.size()}; i < best_chain.size(); ++i) {
+            chain.push_back(best_chain[i]);
         }
     }
 
