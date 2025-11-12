@@ -3,9 +3,6 @@
 
 #include "simulation.h"
 
-//! How often to print statistics.
-static constexpr std::chrono::seconds PRINT_INTERVAL{BLOCK_INTERVAL * 144};
-
 //! How long to run each simulation for.
 static constexpr std::chrono::months SIM_DURATION{12};
 
