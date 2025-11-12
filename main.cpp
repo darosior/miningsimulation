@@ -47,19 +47,19 @@ std::vector<Miner> SetupMiners()
 
     // Use hashrate data from https://mainnet.observer/charts/mining-pools-hashrate-distribution.
     // Assume homogenous propagation time (optimistic, as bigger pools are more likely to be better
-    // connected). We choose the propagation time according to historical data from
-    // https://www.dsn.kastel.kit.edu/bitcoin. For the deteriorated propagation case we choose 20s
-    // (probably on the pessimistic end).
-    miners.emplace_back(0, 30, 20s); // Antpool & co.
-    miners.emplace_back(1, 29, 20s); // Foundry.
-    miners.emplace_back(2, 12, 20s); // ViaBTC.
-    miners.emplace_back(3, 11, 20s); // F2pool.
-    miners.emplace_back(4, 8, 20s); // Spider.
-    miners.emplace_back(5, 5, 20s); // Mara.
-    miners.emplace_back(6, 3, 20s); // Secpool.
+    // connected). According to historical data from https://www.dsn.kastel.kit.edu/bitcoin the vast
+    // majority of blocks reach relevant nodes within a second nowadays, improved from close to 10
+    // seconds a decade ago.
+    miners.emplace_back(0, 30, 1s); // Antpool & co. (Approximation)
+    miners.emplace_back(1, 29, 1s); // Foundry. (Approximation)
+    miners.emplace_back(2, 12, 1s); // ViaBTC. (Approximation)
+    miners.emplace_back(3, 11, 1s); // F2pool. (Approximation)
+    miners.emplace_back(4, 8, 1s); // Spider. (Approximation)
+    miners.emplace_back(5, 5, 1s); // Mara. (Approximation)
+    miners.emplace_back(6, 3, 1s); // Secpool. (Approximation)
     // Some made-up small miners
-    miners.emplace_back(7, 1, 20s);
-    miners.emplace_back(8, 1, 20s);
+    miners.emplace_back(7, 1, 1s);
+    miners.emplace_back(8, 1, 1s);
 
     return miners;
 }
