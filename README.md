@@ -18,16 +18,25 @@ RNG than the default one from the STL.
 
 # Running the simulation
 
+By default the program will run 32768 simulations for a year (in parallel) and print statistics
+averaged over all the runs. This can be tweaked by changing the `SIM_DURATION` and `SIM_RUNS`
+constants at the top of [`main.cpp`](main.cpp).
+
+The network settings can be tweaked by changing the definition of the `SetupMiners` function in
+[`main.cpp`](main.cpp). By default it's been set to approximate the hashrate distribution and block
+propagation times at the time of writing.
+
 You will need a C++ compiler compatible with C++20 (any remotely modern C++ compiler will do).
 That's it. For instance with clang 19:
 ```
 clang++-19 -O3 -std=c++20 main.cpp -o simulation
 ```
 
-Running the program will run the simulation forever:
+Then simply run the program:
 ```
 ./simulation
 ```
+
 # Example results
 
 ## Impact of block propagation on centralization pressure
