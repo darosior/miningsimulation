@@ -98,6 +98,22 @@ bool AnyBlockInFlight(const std::vector<Miner>& miners, std::chrono::millisecond
     return false;
 }
 
+/** The earliest next block to arrive, if any. */
+std::optional<std::chrono::milliseconds> EarliestArrival(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
+{
+    std::optional<std::chrono::milliseconds> earliest_arrival{};
+    for (const auto& miner: miners) {
+        if (const auto next_arrival = miner.NextArrival(cur_time)) {
+            if (earliest_arrival.has_value()) {
+                earliest_arrival = std::min(earliest_arrival.value(), next_arrival.value());
+            } else {
+                earliest_arrival = next_arrival;
+            }
+        }
+    }
+    return earliest_arrival;
+}
+
 /** Simulate the Bitcoin mining process for a given amount of time with the given miners, each having its
  * own share of network hashrate and block propagation time.
  *
@@ -134,7 +150,7 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
     size_t best_chain_size{1};
-    for (std::chrono::milliseconds cur_time{0}; cur_time < duration_time; cur_time += 1ms) {
+    for (std::chrono::milliseconds cur_time{0}; cur_time < duration_time; ) {
         // Has a block been found by now? NOTE: `while` and not `if` in the unlikely case that
         // NextBlockInterval() returns 0.
         while (cur_time == next_block_time) {
@@ -157,19 +173,16 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
         // information.
         best_chain_size = best_chain.size();
 
-        // Optimisation: every so often check whether we can just jump to the time the next block is
-        // found.
-        if (cur_time % mean_prop_time == 0ms) {
-            // If all published block were received by all miners, there is no event until the next
-            // block is found. Cut through directly to this time.
-            if (!AnyBlockInFlight(miners, cur_time)) {
-                cur_time = next_block_time - 1ms;
-                continue;
+        // There is only two events that may change the state of miners (including the selfish ones):
+        // a block is found, or a block is received. Instead of iterating through every ms where nothing
+        // will happen, cut-through to the next event.
+        const auto earliest_arrival{EarliestArrival(miners, cur_time)};
+        cur_time = next_block_time;
+        if (earliest_arrival.has_value()) {
+            if (earliest_arrival.value() < cur_time) {
+                cur_time = earliest_arrival.value();
             }
         }
-
-        // TODO: do we want to be smart and always compute the time increment in function of the
-        // next event (block arrival / block found)? Maybe not worth it.
     }
 
     const auto best_chain{BestChain(miners, duration_time)};

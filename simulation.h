@@ -88,6 +88,19 @@ struct Miner {
         return unpublished_blocks;
     }
 
+    /** The earliest block published by this miner that has not yet propagated to the network, if any. */
+    std::optional<std::chrono::milliseconds> NextArrival(std::chrono::milliseconds cur_time) const {
+        std::optional<std::chrono::milliseconds> earliest_arrival{};
+        for (const auto& block: std::views::reverse(chain)) {
+            // Arrival time is monotonic.
+            if (block.arrival <= cur_time) {
+                break;
+            }
+            earliest_arrival = block.arrival;
+        }
+        return earliest_arrival;
+    }
+
     /** Length of a selfish miner's private branch. Called `privateBranchLen` in the paper's algorithm. */
     size_t SelfishBlocks() const {
         size_t selfish_blocks{0};
