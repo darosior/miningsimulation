@@ -56,8 +56,8 @@ def get_stale_rates(prop_times):
     return stale_rates
 
 def get_net_benefits(prop_times):
-    """Get a mapping from pool name to a list of advantages (in additional percentages of
-    blocks found) at various propagation times."""
+    """Get a mapping from pool name to a list of advantages (in relative revenue increase)
+    at various propagation times."""
     stale_rates = get_stale_rates(prop_times)
 
     benefits = {}
@@ -70,8 +70,9 @@ def get_net_benefits(prop_times):
         for name in stale_rates:
             if name not in benefits:
                 benefits[name] = []
-            actual_share = POOLS[name] * (1 - stale_rates[name][i]) / total_found
-            benefits[name].append(actual_share - POOLS[name])
+            pool_hashrate = POOLS[name]
+            actual_share = pool_hashrate * (1 - stale_rates[name][i]) / total_found
+            benefits[name].append((actual_share - pool_hashrate) / pool_hashrate)
 
     return benefits
 
@@ -96,7 +97,7 @@ def plot_benefits(prop_times):
         rates_perc = [rate * 100 for rate in benefits[name]]
         ax.plot(prop_times, rates_perc, label=name)
     ax.set_xlabel("Propagation time (seconds)")
-    ax.set_ylabel("Change in share of network hashrate controlled (%)")
+    ax.set_ylabel("Change in revenue (%)")
     ax.legend()
 
     plt.show()
