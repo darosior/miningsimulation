@@ -15,7 +15,7 @@ struct MinerStats {
     long blocks_found;
     //! The ratio of blocks found by this miner in the best chain.
     double blocks_share;
-    //! The ratio of blocks found in the best chain over stale blocks for this miner.
+    //! The ratio of stale blocks over all the blocks found by this miner, whether in the best chain or not.
     double stale_rate;
 
     /** Compute revenue statistics for this miner in the given best chain. */
@@ -26,7 +26,9 @@ struct MinerStats {
         });
         // -1 for the genesis block.
         blocks_share = blocks_found == 0 ? 0.0 : static_cast<double>(blocks_found) / (best_chain.size() - 1);
-        stale_rate = blocks_found == 0 ? 0.0 : static_cast<double>(miner.stale_blocks) / blocks_found;
+        // The blocks found by this miner are those which made it to the best chain plus the stale ones.
+        const long total_found{blocks_found + miner.stale_blocks};
+        stale_rate = total_found == 0 ? 0.0 : static_cast<double>(miner.stale_blocks) / total_found;
     }
 
     explicit MinerStats(): blocks_found{0}, blocks_share{0.0}, stale_rate{0.0} {}

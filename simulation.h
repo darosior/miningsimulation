@@ -203,11 +203,12 @@ struct Miner {
         return static_cast<double>(found_blocks) / (published_blocks - 1); // -1 for the genesis
     }
 
-    /** Proportion of stale blocks per block found by this miner. */
+    /** Proportion of stale blocks among all the blocks found by this miner. */
     double StaleRate(std::chrono::milliseconds cur_time) const {
-        long found_blocks{BlocksFound(cur_time)};
-        if (found_blocks == 0) return 0.0;
-        return static_cast<double>(stale_blocks) / found_blocks;
+        // BlocksFound() only counts the blocks still in our chain, i.e. those which did not go stale.
+        long total_found{BlocksFound(cur_time) + stale_blocks};
+        if (total_found == 0) return 0.0;
+        return static_cast<double>(stale_blocks) / total_found;
     }
 };
 
