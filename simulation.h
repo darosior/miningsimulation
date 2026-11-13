@@ -174,9 +174,13 @@ struct Miner {
             if (selfish_count > 1 && current_lead == 1) {
                 reveal_count = selfish_count;
             }
-            // Broadcast as many blocks as necessary by setting their arrival time.
+            // Broadcast as many blocks as necessary by setting their arrival time. We reveal them in reaction
+            // to a block the other miners received at the same time as us, so ours necessarily arrive after
+            // it even if they propagate instantly. NOTE: this also makes sure the simulation never misses
+            // a block revealed now, as it only looks for blocks arriving after the current time.
+            const auto arrival{cur_time + std::max(propagation, 1ms)};
             for (size_t i{0}; i < reveal_count; ++i) {
-                chain.at(chain.size() - selfish_count + i).arrival = cur_time + propagation;
+                chain.at(chain.size() - selfish_count + i).arrival = arrival;
             }
         }
     }

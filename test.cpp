@@ -383,6 +383,19 @@ void TestSelfishStrategy()
     selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*5);
     assert(selfish_miner.chain == best_chain);
 
+    /** Case absent from the paper. The blocks of the selfish miner propagate instantly. A block he reveals in reaction
+     * to one from the other miners must still arrive after it. */
+    Miner instant_selfish_miner{SM_ID, 35, 0ms, true};
+    // Set the chain of the selfish miner accordingly to a 1 block best chain with a 1-block private fork on top.
+    instant_selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, SELFISH_ARRIVAL)};
+
+    // Now the selfish miner is notified of an equal-size best chain with the last block being the others'. He reveals
+    // his block, which arrives right after the others'.
+    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(OTHERS_ID, 600s*2)};
+    instant_selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*2);
+    expected_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2 + 1ms)};
+    assert(instant_selfish_miner.chain == expected_chain);
+
     std::cout << "Selfish mining strategy tests passed." << std::endl;
 }
 
