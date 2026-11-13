@@ -192,17 +192,20 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
 int main()
 {
     const auto miners{SetupMiners()};
-    const auto thread_count{std::thread::hardware_concurrency()};
+    // NOTE: hardware_concurrency() returns 0 if it cannot tell.
+    const auto thread_count{std::max(1u, std::thread::hardware_concurrency())};
     std::vector<MinerStats> stats_total(miners.size());
 
     std::cout << "Running " << SIM_RUNS << " simulations in parallel using " << thread_count << " threads." << std::endl;
 
-    // Run the simulation `SIM_RUNS` times by batches of `thread_count` parallel tasks. Record all stats
-    // into `stats_total`.
+    // Run the simulation `SIM_RUNS` times by batches of at most `thread_count` parallel tasks. Record
+    // all stats into `stats_total`.
     unsigned int remaining_tasks{SIM_RUNS};
     while (remaining_tasks > 0) {
+        // The last batch is smaller if `SIM_RUNS` is not a multiple of `thread_count`.
+        const auto batch_size{std::min(thread_count, remaining_tasks)};
         std::vector<std::future<std::vector<MinerStats>>> sim_futures;
-        for (int i{0}; i < std::min(thread_count, remaining_tasks); ++i) {
+        for (unsigned int i{0}; i < batch_size; ++i) {
             sim_futures.emplace_back(std::async(std::launch::async, &RunSimulation, SIM_DURATION, miners));
         }
         for (auto& fut: sim_futures) {
@@ -212,7 +215,7 @@ int main()
                 stats_total[j] += stats[j];
             }
         }
-        remaining_tasks -= thread_count;
+        remaining_tasks -= batch_size;
         std::cout << '\r' << (SIM_RUNS - remaining_tasks) * 100 / SIM_RUNS << "% progress..";
     }
     std::cout << std::endl;
