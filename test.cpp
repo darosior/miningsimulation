@@ -399,6 +399,28 @@ void TestSelfishStrategy()
     std::cout << "Selfish mining strategy tests passed." << std::endl;
 }
 
+/** Test a block is not counted as stale anymore if it makes it back to the best chain. */
+void TestStaleBlocks()
+{
+    constexpr int MINER_ID{0}, OTHER_A{1}, OTHER_B{2};
+    Miner miner{MINER_ID, 30, 1s};
+
+    // The miner finds a block but the 2-blocks chain of another miner is propagated first. Its block is stale.
+    miner.FoundBlock(600s);
+    std::vector<Block> best_chain = {Block::Genesis(), Block(OTHER_A, 601s + 500ms), Block(OTHER_A, 602s + 200ms)};
+    miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 602s + 200ms);
+    assert(miner.chain == best_chain);
+    assert(miner.stale_blocks == 1);
+
+    // A third miner kept mining on top of the miner's block, and now has the longest chain. Its block is not stale anymore.
+    best_chain = {Block::Genesis(), Block(MINER_ID, 601s), Block(OTHER_B, 602s + 500ms), Block(OTHER_B, 611s)};
+    miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 611s);
+    assert(miner.chain == best_chain);
+    assert(miner.stale_blocks == 0);
+
+    std::cout << "Stale blocks accounting tests passed." << std::endl;
+}
+
 int main()
 {
     //MinerPickerSample();
@@ -406,4 +428,5 @@ int main()
     //MinerPickerSmallBig();
     //SimpleSim();
     TestSelfishStrategy();
+    TestStaleBlocks();
 }

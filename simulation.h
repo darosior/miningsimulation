@@ -142,9 +142,11 @@ struct Miner {
             chain.pop_back();
         }
 
-        // Adopt the best chain.
+        // Adopt the best chain. NOTE: it may contain a block of ours we had dropped for another chain,
+        // and counted as stale, if another miner kept mining on top of it.
         assert(best_chain.size() > chain.size()); // Checked above.
         for (size_t i{chain.size()}; i < best_chain.size(); ++i) {
+            if (best_chain[i].miner_id == id) stale_blocks--;
             chain.push_back(best_chain[i]);
         }
     }
