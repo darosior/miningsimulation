@@ -27,7 +27,7 @@ void MinerPickerSample()
 
     for (int i{0}; i < TOTAL_BLOCK_COUNT; ++i) {
         auto& miner{PickFinder(miners, rng)};
-        miner.FoundBlock(0ms, 0);
+        miner.FoundBlock(0ms);
     }
 
     double mean{0.0}, squared_mean{0.0};
@@ -90,7 +90,7 @@ void MinerPickerSmallBig()
         for (int j{0}; j < SAMPLE_SIZE; ++j) {
             for (int i{0}; i < TOTAL_BLOCK_COUNT; ++i) {
                 auto& miner{PickFinder(miners, rng)};
-                miner.FoundBlock(0ms, 0);
+                miner.FoundBlock(0ms);
             }
 
             for (size_t i{0}; i < miners.size(); ++i) {
@@ -143,7 +143,7 @@ void SimpleSim()
             for (std::chrono::milliseconds cur_time{0}; cur_time < SIM_DURATION; cur_time += 1s) {
                 while (cur_time >= next_block_time) {
                     Miner& miner{PickFinder(miners, miner_picker)};
-                    miner.FoundBlock(next_block_time, /*best_chain_size=*/0); // best chain size 0 since no selfish mining
+                    miner.FoundBlock(next_block_time);
                     next_block_time += NextBlockInterval(block_interval);
                 }
 
@@ -223,13 +223,13 @@ void TestSelfishStrategy()
 
     // Private fork of 0 block, best chain fork of 0 block, pool finds a block. "The pool appends
     // one block to its private branch, increasing its lead on the public branch by one."
-    selfish_miner.FoundBlock(600s * 3, selfish_miner.chain.size());
+    selfish_miner.FoundBlock(600s * 3);
     assert(selfish_miner.chain.size() == 4);
     assert(selfish_miner.chain[3].miner_id == SM_ID && selfish_miner.chain[3].arrival == SELFISH_ARRIVAL);
 
     // Private chain of 1 block, best chain fork of 0 block, pool finds a block. "The pool appends
     // one block to its private branch, increasing its lead on the public branch by one."
-    selfish_miner.FoundBlock(600s * 4, 3);
+    selfish_miner.FoundBlock(600s * 4);
     assert(selfish_miner.chain.size() == 5);
     std::vector<Block> expected_chain{Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)};
     assert(selfish_miner.chain == expected_chain);
@@ -238,12 +238,22 @@ void TestSelfishStrategy()
     // Set the chain of the selfish miner accordingly to a 4 blocks best chain and its 1-block fork on top.
     selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, SELFISH_ARRIVAL)};
 
+    // The others find a block too. The selfish miner reveals his (see case (f) below) and there are now two
+    // branches of length 1.
+    std::vector<Block> best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(OTHERS_ID, 600s*4)};
+    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*4);
+
     // Now the selfish miner finds a block. "The pool publishes its secret branch of length two".
-    selfish_miner.FoundBlock(600s * 6, 5); // best chain size is 5 cause the rest of the miners have a 1-block fork too.
+    selfish_miner.FoundBlock(600s * 5);
     expected_chain = {
         Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3),
-        Block(SM_ID, 600s*6 + SM_PROP_TIME), Block(SM_ID, 600s*6 + SM_PROP_TIME)
+        Block(SM_ID, 600s*4 + SM_PROP_TIME), Block(SM_ID, 600s*5 + SM_PROP_TIME)
     };
+    assert(selfish_miner.chain == expected_chain);
+
+    // He won the race, and is back to withholding the blocks he finds.
+    selfish_miner.FoundBlock(600s * 6);
+    expected_chain.emplace_back(SM_ID, SELFISH_ARRIVAL);
     assert(selfish_miner.chain == expected_chain);
 
     /** Case (c), was two branches of length 1, others find a block after pool head. */
@@ -253,11 +263,21 @@ void TestSelfishStrategy()
     // Set the chain of the selfish miner accordingly to a 4 blocks best chain and its 1-block fork on top.
     selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, SELFISH_ARRIVAL)};
 
+    // The others find a block too. The selfish miner reveals his and there are now two branches of length 1.
+    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(OTHERS_ID, 600s*4)};
+    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*4);
+
     // Now the selfish miner is notified of a longer best chain with the last two blocks being the others'. He
     // switches to mining on top of it.
-    std::vector<Block> best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(OTHERS_ID, 600s*4), Block(OTHERS_ID, 600s*5)};
+    best_chain.emplace_back(OTHERS_ID, 600s*5);
     selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*5);
     assert(selfish_miner.chain == best_chain);
+
+    // He lost the race, and is back to withholding the blocks he finds.
+    selfish_miner.FoundBlock(600s * 6);
+    expected_chain = best_chain;
+    expected_chain.emplace_back(SM_ID, SELFISH_ARRIVAL);
+    assert(selfish_miner.chain == expected_chain);
 
     /** Case (e), no private branch, others find a block. */
     // Set the chain of the selfish miner accordingly to a 5 blocks best chain with no private fork on top.

@@ -146,13 +146,12 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
 
     // Run the simulation. As we advance time, we check if a block was found, and if so which miner
     // found it. We also check if any miner needs to reorg once one miner's chain reached it.
-    size_t best_chain_size{1};
     for (std::chrono::milliseconds cur_time{0}; cur_time < duration_time; ) {
         // Has a block been found by now? NOTE: `while` and not `if` in the unlikely case that
         // NextBlockInterval() returns 0.
         while (cur_time == next_block_time) {
             Miner& miner{PickFinder(miners, miner_picker)};
-            miner.FoundBlock(next_block_time, best_chain_size);
+            miner.FoundBlock(next_block_time);
             next_block_time += NextBlockInterval(block_interval);
         }
         assert(cur_time < next_block_time); // Must never miss any as we advance in steps of 1ms.
@@ -165,10 +164,6 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
         for (auto& miner: miners) {
             miner.NotifyBestChain(best_chain, cur_time);
         }
-
-        // Record the best chain size as FoundBlock() may decide not to publish a block based on this
-        // information.
-        best_chain_size = best_chain.size();
 
         // There is only two events that may change the state of miners (including the selfish ones):
         // a block is found, or a block is received. Instead of iterating through every ms where nothing

@@ -38,6 +38,12 @@ struct Block {
     }
 };
 
+/** The size of a chain and its last block. */
+struct ChainTip {
+    size_t size;
+    Block block;
+};
+
 struct Miner {
     //! Miner identifier used to track which miner created a certain block.
     unsigned id;
@@ -53,24 +59,25 @@ struct Miner {
     int stale_blocks;
     //! Whether this miner follows a (worst case) selfish mining strategy as described in section 3.2 of https://arxiv.org/pdf/1311.0243.
     bool is_selfish;
+    //! The tip of the best published chain this miner was last notified of. A selfish miner needs it to
+    //! tell whether it is in a race when it finds a block.
+    ChainTip best_tip;
 
     explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, bool selfish = false)
-        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}, is_selfish{selfish}
+        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}, is_selfish{selfish}, best_tip{1, Block::Genesis()}
     {}
 
     /** Add a block found at the given block time to this miner's local chain. */
-    void FoundBlock(std::chrono::milliseconds block_time, size_t best_chain_size) {
-        if (is_selfish) {
-            // A selfish miner always mines on top of its private chain, except in the case of a 1-block
-            // race whereby if he wins the race he'll publish both blocks.
-            const bool is_race{SelfishBlocks() == 1 && best_chain_size == chain.size()};
-            if (is_race) {
-                chain.back().arrival = block_time + propagation;
-                chain.emplace_back(id, block_time + propagation);
-            } else {
-                chain.emplace_back(id, SELFISH_ARRIVAL);
-            }
+    void FoundBlock(std::chrono::milliseconds block_time) {
+        // A selfish miner is in a race if its chain is the same size as the best published chain but ends
+        // in a different block.
+        const bool in_race{chain.size() == best_tip.size && chain.back() != best_tip.block};
+        if (is_selfish && !in_race) {
+            // A selfish miner always withholds the blocks it finds, except in the case of a race.
+            chain.emplace_back(id, SELFISH_ARRIVAL);
         } else {
+            // A selfish miner which finds a block while in a race publishes it immediately, as its chain
+            // is now the longest. The blocks before it were already revealed by MaybeSelfishReveal().
             chain.emplace_back(id, block_time + propagation);
         }
     }
@@ -101,7 +108,8 @@ struct Miner {
         return earliest_arrival;
     }
 
-    /** Length of a selfish miner's private branch. Called `privateBranchLen` in the paper's algorithm. */
+    /** Number of blocks a selfish miner has not revealed yet. NOTE: this is not `privateBranchLen` from the
+     * paper's algorithm, which also counts the blocks of the private branch that were already revealed. */
     size_t SelfishBlocks() const {
         size_t selfish_blocks{0};
         for (const auto& block: std::views::reverse(chain)) {
@@ -177,6 +185,8 @@ struct Miner {
     void NotifyBestChain(std::span<const Block> best_chain, std::chrono::milliseconds cur_time) {
         MaybeSelfishReveal(best_chain, cur_time);
         MaybeReorg(best_chain);
+        // Remember where the best chain stands, FoundBlock() needs to know.
+        best_tip = {best_chain.size(), best_chain.back()};
     }
 
     /** Count of published blocks found by this miner. */
