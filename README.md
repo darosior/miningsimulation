@@ -88,8 +88,8 @@ more stale blocks on its competition than on itself, leading to an inflated "eff
 
 In this example we run the simulation with a similar setup as in the previous section, except we
 bump the larger miner's hashrate from 30% to 40% and make them adopt the "selfish mining" strategy.
-It leads to this miner finding about 46.5% of blocks, increasing its revenues by ~16% at the expense
-of all other miners.
+It leads to this miner finding about 46.5% of blocks, increasing its share of blocks by ~16% at the
+expense of all other miners.
 
 ```
 Running 32768 simulations in parallel using 16 threads.
