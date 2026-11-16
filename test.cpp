@@ -110,72 +110,147 @@ void TestBlockInterval()
     std::cout << "Block interval tests passed." << std::endl;
 }
 
-/* Run the simulation from main.cpp 100 times for two weeks. Take a 100 such samples. Compute the sample mean of the distribution of blocks found per miner. */
-void SimpleSim()
+/**
+ * The tests below run whole simulations and compare their outcome to what it is known to be in theory.
+ */
+
+//! How long each simulation is run for in these tests.
+static constexpr std::chrono::days SIM_DURATION{365};
+
+/** What we measure for a miner in each simulation. */
+struct MinerSamples {
+    Sample blocks_share, stale_rate;
+};
+
+/** Run 100 simulations with the given miners and record the outcome of each of them, for each miner. */
+std::vector<MinerSamples> RunSimulations(const std::vector<Miner>& miners)
 {
-    constexpr int SAMPLE_COUNT{100};
-    constexpr int SAMPLE_SIZE{100};
-    static constexpr std::chrono::milliseconds SIM_DURATION{BLOCK_INTERVAL * 144 * 14};
+    std::vector<MinerSamples> samples(miners.size());
+    for (uint64_t seed{0}; seed < 100; ++seed) {
+        const auto stats{RunSimulation(SIM_DURATION, miners, seed)};
+        for (size_t i{0}; i < miners.size(); ++i) {
+            samples[i].blocks_share.Add(stats[i].blocks_share);
+            samples[i].stale_rate.Add(stats[i].stale_rate);
+        }
+    }
+    return samples;
+}
+
+/** When blocks propagate instantly, each miner must get a share of the blocks equal to its share of the network
+ * hashrate and no block may go stale. */
+void TestInstantPropagation()
+{
+    std::vector<Miner> miners;
+    miners.emplace_back(0, 50, 0s);
+    miners.emplace_back(1, 30, 0s);
+    miners.emplace_back(2, 20, 0s);
+
+    const auto results{RunSimulations(miners)};
+    for (size_t i{0}; i < miners.size(); ++i) {
+        assert(results[i].blocks_share.Matches(Hashrate(miners[i])));
+        // The only blocks which may go stale are those found the very same millisecond as another one. This is
+        // fewer than one block in 100'000.
+        assert(results[i].stale_rate.Mean() < 1.0 / 100'000);
+    }
+
+    std::cout << "Instant propagation tests passed." << std::endl;
+}
+
+/** The probability for a block found by `miner` to go stale, when a block takes `propagation` to reach the miners
+ * which did not find it. This is the model plotted by plot_stale_rate/plot.py.
+ *
+ * A block goes stale when another miner finds a competing block (the two miners had not received each other's),
+ * and the next block is found on top of this other block. This ignores what happens when more than two blocks
+ * compete, which makes it accurate to within about `propagation / BLOCK_INTERVAL`.
+ */
+double ExpectedStaleRate(const std::vector<Miner>& miners, const Miner& miner, std::chrono::milliseconds propagation)
+{
+    // The probability that miners with this share of the network hashrate find a block within `propagation`.
+    const auto p_block_within_propagation = [&](double hashrate) {
+        return 1 - std::exp(-hashrate * propagation / BLOCK_INTERVAL);
+    };
+
+    // The competing block may have been found right before ours. All the other miners received it before ours,
+    // they mine on top of it. Our block goes stale unless we are the one finding the next block.
+    const double others_hashrate{1 - Hashrate(miner)};
+    double stale_rate{p_block_within_propagation(others_hashrate) * others_hashrate};
+
+    // Or the competing block may be found right after ours. All the other miners received ours first, only its
+    // finder mines on top of it. Our block goes stale if this miner also finds the next block.
+    for (const auto& other: miners) {
+        if (other.id == miner.id) continue;
+        stale_rate += p_block_within_propagation(Hashrate(other)) * Hashrate(other);
+    }
+
+    return stale_rate;
+}
+
+/** When blocks take time to propagate, they must go stale at the rate given by ExpectedStaleRate(). This rate is
+ * lower for larger miners, which must therefore get a larger share of the blocks than their share of hashrate. */
+void TestPropagationDelay()
+{
+    constexpr std::chrono::seconds PROPAGATION{10};
 
     std::vector<Miner> miners;
-    miners.emplace_back(0, 12, 0s);
-    miners.emplace_back(1, 18, 0s);
-    miners.emplace_back(2, 20, 0s);
-    miners.emplace_back(3, 15, 0s);
-    miners.emplace_back(4, 35, 0s);
+    miners.emplace_back(0, 50, PROPAGATION);
+    miners.emplace_back(1, 30, PROPAGATION);
+    miners.emplace_back(2, 20, PROPAGATION);
 
-    std::vector<double> sample_means(miners.size()), sample_squared_means(miners.size());
-    for (int counter1{0}; counter1 < SAMPLE_COUNT; ++counter1) {
-        std::vector<double> means(miners.size());
-        for (int counter2{0}; counter2 < SAMPLE_SIZE; ++counter2) {
-            // Reproduce a simplified version of the simulation in main.cpp. No selfish mining and steps of 1s.
-            std::random_device rd;
-            RNG block_interval{rd()}, miner_picker{rd()};
-            std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval)};
-            for (std::chrono::milliseconds cur_time{0}; cur_time < SIM_DURATION; cur_time += 1s) {
-                while (cur_time >= next_block_time) {
-                    Miner& miner{PickFinder(miners, miner_picker)};
-                    miner.FoundBlock(next_block_time);
-                    next_block_time += NextBlockInterval(block_interval);
-                }
-
-                std::span<const Block> best_chain;
-                for (const auto& miner: miners) {
-                    const auto pub_chain{miner.PublishedChain(cur_time)};
-                    const bool more_work{pub_chain.size() > best_chain.size()};
-                    const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
-                    if (more_work || first_seen) {
-                        best_chain = pub_chain;
-                    }
-                }
-                for (auto& miner: miners) {
-                    miner.NotifyBestChain(best_chain, cur_time);
-                }
-            }
-
-            for (size_t i{0}; i < miners.size(); ++i) {
-                means[i] += miners[i].BlocksFoundShare(SIM_DURATION);
-                miners[i].chain.clear();
-            }
-        }
-
-        for (size_t i{0}; i < miners.size(); ++i) {
-            means[i] /= SAMPLE_SIZE;
-            sample_means[i] += means[i];
-            sample_squared_means[i] += std::pow(means[i], 2);
-        }
-
-        // Show some progress as the runtime is still pretty long
-        std::cout << counter1 * 100 / SAMPLE_COUNT << "%" << "\r" << std::flush;
+    // The proportion of all the blocks found on the network which are expected to not go stale.
+    double expected_not_stale{0.0};
+    for (const auto& miner: miners) {
+        expected_not_stale += Hashrate(miner) * (1 - ExpectedStaleRate(miners, miner, PROPAGATION));
     }
 
+    const auto results{RunSimulations(miners)};
     for (size_t i{0}; i < miners.size(); ++i) {
-        sample_means[i] /= SAMPLE_COUNT;
-        sample_squared_means[i] /= SAMPLE_COUNT;
-        const double std_dev{std::sqrt(sample_squared_means[i] - std::pow(sample_means[i], 2))};
-        std::cout << std::fixed << "Miner " << miners[i].id << " with " << miners[i].perc << "% of the hashrate: ";
-        std::cout << std::fixed << "sample mean " << sample_means[i] * 100 << " std dev of sample mean " << std_dev * 100 << std::endl;
+        // The model is an approximation, see ExpectedStaleRate(). We accept a 5% difference with it.
+        const double expected_stale_rate{ExpectedStaleRate(miners, miners[i], PROPAGATION)};
+        assert(std::abs(results[i].stale_rate.Mean() / expected_stale_rate - 1) < 0.05);
+
+        // The blocks in the best chain are those which did not go stale. The share of a miner in the best chain
+        // is therefore the proportion of all blocks which are its own and not stale, over the proportion of all
+        // blocks which are not stale.
+        const double expected_share{Hashrate(miners[i]) * (1 - expected_stale_rate) / expected_not_stale};
+        assert(results[i].blocks_share.Matches(expected_share));
     }
+
+    std::cout << "Propagation delay tests passed." << std::endl;
+}
+
+/** The share of blocks expected for a selfish miner with a share `alpha` of the network hashrate. This is the
+ * revenue of the pool given by equation (8) in the 2013 paper (https://arxiv.org/pdf/1311.0243) for gamma=0, i.e.
+ * when no other miner ever mines on top of the selfish miner's block in a race. */
+double ExpectedSelfishShare(double alpha)
+{
+    return (alpha * std::pow(1 - alpha, 2) * 4 * alpha - std::pow(alpha, 3)) / (1 - alpha * (1 + (2 - alpha) * alpha));
+}
+
+/** A selfish miner must get the share of blocks computed in the 2013 paper. */
+void TestSelfishMining()
+{
+    // With less than a third of the network hashrate selfish mining is a loss (30% of the hashrate gets 27.3% of
+    // the blocks), with more it is a gain (40% of the hashrate gets 48.4% of the blocks).
+    for (const int selfish_perc: {30, 40}) {
+        // As in the paper, blocks propagate instantly.
+        std::vector<Miner> miners;
+        miners.emplace_back(0, selfish_perc, 0s, true);
+        miners.emplace_back(1, 70 - selfish_perc, 0s);
+        miners.emplace_back(2, 20, 0s);
+        miners.emplace_back(3, 10, 0s);
+
+        const auto results{RunSimulations(miners)};
+        const double expected_selfish_share{ExpectedSelfishShare(Hashrate(miners[0]))};
+        assert(results[0].blocks_share.Matches(expected_selfish_share));
+
+        // The other miners split the remaining blocks in proportion to their hashrate.
+        for (size_t i{1}; i < miners.size(); ++i) {
+            const double expected_share{(1 - expected_selfish_share) * Hashrate(miners[i]) / (1 - Hashrate(miners[0]))};
+            assert(results[i].blocks_share.Matches(expected_share));
+        }
+    }
+
+    std::cout << "Selfish mining tests passed." << std::endl;
 }
 
 /** Test our implementation of the "worst case" (gamma=0) selfish mining strategy. This goes over all the possible state in
@@ -394,9 +469,11 @@ void TestStaleBlocks()
 
 int main()
 {
-    //SimpleSim();
     TestSelfishStrategy();
     TestStaleBlocks();
     TestMinerPicker();
     TestBlockInterval();
+    TestInstantPropagation();
+    TestPropagationDelay();
+    TestSelfishMining();
 }
