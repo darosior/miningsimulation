@@ -237,6 +237,162 @@ Miner& PickFinder(std::vector<Miner>& miners, RNG& rng)
     assert(!"The miners' percentages must add up to 100.");
 }
 
+/** Statistics about a miner's revenue in function of the best chain. */
+struct MinerStats {
+    //! The count of blocks found by this miner in the best chain.
+    long blocks_found;
+    //! The ratio of blocks found by this miner in the best chain.
+    double blocks_share;
+    //! The ratio of stale blocks over all the blocks found by this miner, whether in the best chain or not.
+    double stale_rate;
+
+    /** Compute revenue statistics for this miner in the given best chain. */
+    explicit MinerStats(const Miner& miner, std::span<const Block> best_chain)
+    {
+        blocks_found = std::count_if(best_chain.begin(), best_chain.end(), [&miner](const Block& b) {
+            return b.miner_id == miner.id;
+        });
+        // -1 for the genesis block.
+        blocks_share = blocks_found == 0 ? 0.0 : static_cast<double>(blocks_found) / (best_chain.size() - 1);
+        // The blocks found by this miner are those which made it to the best chain plus the stale ones.
+        const long total_found{blocks_found + miner.stale_blocks};
+        stale_rate = total_found == 0 ? 0.0 : static_cast<double>(miner.stale_blocks) / total_found;
+    }
+
+    explicit MinerStats(): blocks_found{0}, blocks_share{0.0}, stale_rate{0.0} {}
+
+    MinerStats& operator+=(const MinerStats& other)
+    {
+        blocks_found += other.blocks_found;
+        blocks_share += other.blocks_share;
+        stale_rate += other.stale_rate;
+        return *this;
+    }
+};
+
+/** Get the best chain known by any miner. */
+std::span<const Block> BestChain(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
+{
+    std::span<const Block> best_chain;
+
+    for (const auto& miner: miners) {
+        const auto pub_chain{miner.PublishedChain(cur_time)};
+        const bool more_work{pub_chain.size() > best_chain.size()};
+        const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
+        if (more_work || first_seen) {
+            best_chain = pub_chain;
+        }
+    }
+
+    return best_chain;
+}
+
+/** Has any miner published a block that was not yet received by the entirety of the network? */
+bool AnyBlockInFlight(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
+{
+    for (const auto& miner: miners) {
+        const auto unpublished_blocks{miner.UnpublishedBlocks(cur_time)};
+        if (!miner.is_selfish && unpublished_blocks > 0) {
+            return true;
+        } else if (miner.is_selfish && unpublished_blocks > miner.SelfishBlocks()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The earliest next block to arrive, if any. */
+std::optional<std::chrono::milliseconds> EarliestArrival(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
+{
+    std::optional<std::chrono::milliseconds> earliest_arrival{};
+    for (const auto& miner: miners) {
+        if (const auto next_arrival = miner.NextArrival(cur_time)) {
+            if (earliest_arrival.has_value()) {
+                earliest_arrival = std::min(earliest_arrival.value(), next_arrival.value());
+            } else {
+                earliest_arrival = next_arrival;
+            }
+        }
+    }
+    return earliest_arrival;
+}
+
+/** Simulate the Bitcoin mining process for a given amount of time with the given miners, each having its
+ * own share of network hashrate and block propagation time.
+ *
+ * The propagation time is a simplification: it is the time before which a miner's block has not reached
+ * any other miner and after which it has reached all other miners.
+ *
+ * The mining process is accurately modeled: we draw the time between the last and next block from an
+ * exponential distribution, then draw which miner found this block based on its hashrate and a uniform
+ * distribution. Difficulty and network hashrate are assumed to be constant.
+ *
+ * This assumes today's Bitcoin Core behaviour: a miner will mine on top of its own block immediately and will
+ * only switch to a propagated chain if it's longer (again, difficulty is assumed constant). Miners can optionally
+ * be set to adopt the "selfish mining" strategy in SetupMiners().
+ *
+ * All the randomness is derived from the given seed: the same seed always results in the same simulation.
+ */
+std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, std::vector<Miner> miners, uint64_t seed)
+{
+    // Random number generators used to respectively pick the time before the next block interval and
+    // pick which miner found the last block.
+    RNG seeder{seed};
+    RNG block_interval{seeder.rand64()}, miner_picker{seeder.rand64()};
+
+    // Absolute time of the next block arrival. Since we are starting from 0, for the first one this is
+    // just the block interval itself.
+    std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval)};
+
+    std::chrono::milliseconds mean_prop_time{0};
+    for (const auto& miner: miners) {
+        mean_prop_time += miner.propagation;
+    }
+    mean_prop_time /= miners.size();
+    mean_prop_time = std::max(1ms, mean_prop_time);
+
+    // Run the simulation. As we advance time, we check if a block was found, and if so which miner
+    // found it. We also check if any miner needs to reorg once one miner's chain reached it.
+    for (std::chrono::milliseconds cur_time{0}; cur_time < duration_time; ) {
+        // Has a block been found by now? NOTE: `while` and not `if` in the unlikely case that
+        // NextBlockInterval() returns 0.
+        while (cur_time == next_block_time) {
+            Miner& miner{PickFinder(miners, miner_picker)};
+            miner.FoundBlock(next_block_time);
+            next_block_time += NextBlockInterval(block_interval);
+        }
+        assert(cur_time < next_block_time); // Must never miss any as we advance in steps of 1ms.
+
+        // Record the best propagated chain among all miners, and let them all know about it. They
+        // might switch to it if it's longer or act upon the information (for instance a selfish miner
+        // may selectively reveal some of its private blocks). Among chains of the same size, pick
+        // the one which arrived first (matching Bitcoin Core's first-seen rule).
+        const auto best_chain{BestChain(miners, cur_time)};
+        for (auto& miner: miners) {
+            miner.NotifyBestChain(best_chain, cur_time);
+        }
+
+        // There is only two events that may change the state of miners (including the selfish ones):
+        // a block is found, or a block is received. Instead of iterating through every ms where nothing
+        // will happen, cut-through to the next event.
+        const auto earliest_arrival{EarliestArrival(miners, cur_time)};
+        cur_time = next_block_time;
+        if (earliest_arrival.has_value()) {
+            if (earliest_arrival.value() < cur_time) {
+                cur_time = earliest_arrival.value();
+            }
+        }
+    }
+
+    const auto best_chain{BestChain(miners, duration_time)};
+    std::vector<MinerStats> stats;
+    for (const auto& miner: miners) {
+        stats.emplace_back(MinerStats(miner, best_chain));
+    }
+
+    return stats;
+}
+
 /** Utility function useful in tests or for debugging. */
 void PrintChain(const Miner& miner)
 {
