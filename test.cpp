@@ -1,121 +1,113 @@
 #include <algorithm>
 #include <cmath>
-#include <concepts>
-#include <iomanip>
 #include <iostream>
-#include <map>
-#include <ranges>
 
 #include "simulation.h"
 
-// Analyze a sample of the distribution of blocks found per miners, to check we are indistinguishable from
-// the expected distribution. Here we generate a 100 millions blocks with a 100 miners each with 1% of the
-// network hashrate. The number of blocks found by a miner is a binomial distribution with p=0.01 and n=100 million.
-// We therefore expect a sample mean of 1 million and a standard deviation of 1000. This requires libc++ to compile.
-void MinerPickerSample()
+/**
+ * Some of the tests below are statistical: they measure a random quantity many times and compare the result to
+ * the value we know it must average to. The two never match exactly, so we accept a measure which is within 5
+ * standard deviations of the expected value: a correct implementation fails this about once in a million times.
+ * These tests use fixed seeds, so they give the same result every time they are run.
+ */
+static constexpr int MAX_STD_DEVS{5};
+
+/** Whether seeing an event `count` times out of `trials` is consistent with it having a probability `p` to happen
+ * each time. The count follows a binomial distribution: its mean is `trials * p` and its variance
+ * `trials * p * (1 - p)`. */
+bool MatchesProbability(long count, long trials, double p)
 {
-    std::random_device rd;
-    RNG rng{rd()};
-    constexpr int TOTAL_BLOCK_COUNT{100'000'000};
-
-    std::vector<Miner> miners;
-    for (int i{0}; i < 100; ++i) {
-        miners.emplace_back(i, 1, 0s);
-        miners.back().chain.pop_back(); // drop the genesis block
-        miners.back().chain.reserve((TOTAL_BLOCK_COUNT + 99) / 100);
-    }
-
-    for (int i{0}; i < TOTAL_BLOCK_COUNT; ++i) {
-        auto& miner{PickFinder(miners, rng)};
-        miner.FoundBlock(0ms);
-    }
-
-    double mean{0.0}, squared_mean{0.0};
-    std::map<size_t, int> block_counts;
-    for (const auto& miner: miners) {
-        const auto block_count{miner.chain.size()};
-        mean += block_count;
-        squared_mean += block_count * block_count;
-        auto pair{block_counts.try_emplace(block_count, 0)};
-        pair.first->second++;
-    }
-    mean /= static_cast<double>(miners.size());
-    squared_mean /= static_cast<double>(miners.size());
-
-    const double variance{squared_mean - mean * mean};
-    std::vector sorted_block_counts = miners | std::views::transform([](const Miner& m){ return m.chain.size(); }) | std::ranges::to<std::vector<double>>();
-    std::ranges::sort(sorted_block_counts);
-    const double median{(sorted_block_counts[48] + sorted_block_counts[49]) / 2.0};
-    std::cout << std::fixed << "Mean " << mean << ", std dev " << std::sqrt(variance) << ", median " << median << std::endl;
-
-    /**
-    assert(block_counts.size() <= miners.size());
-    std::cout << "Number of miners with different block counts: " << block_counts.size() << std::endl;
-
-    std::cout << "Histogram:" << std::endl;
-    for (const auto& [block_count, miner_count]: block_counts) {
-        const auto perc{static_cast<double>(block_count) / TOTAL_BLOCK_COUNT * 100};
-        std::cout << std::fixed << std::setprecision(4) << block_count << " (" << perc << "%):";
-        for (int i{0}; i < miner_count; ++i) std::cout << " *";
-        std::cout << std::endl;
-    }
-    */
+    const double expected{trials * p};
+    const double std_dev{std::sqrt(trials * p * (1 - p))};
+    return std::abs(count - expected) < MAX_STD_DEVS * std_dev;
 }
 
-// Analyze the sample mean for many sample drawn from the distribution of blocks with miners with
-// different hashrate. This is to make sure the way we sample from the distribution is not skewed
-// with hashrate somehow.
-void MinerPickerSmallBig()
+/** A number of measures of the same random quantity, used to estimate its average. */
+struct Sample {
+    long count{0};
+    double sum{0.0}, sum_squares{0.0};
+
+    void Add(double value) {
+        count++;
+        sum += value;
+        sum_squares += value * value;
+    }
+
+    double Mean() const { return sum / count; }
+
+    /** The standard deviation of the mean: how far it can be expected to be from the true average. */
+    double StdError() const {
+        const double variance{sum_squares / count - Mean() * Mean()};
+        return std::sqrt(variance / count);
+    }
+
+    /** Whether the mean of the measures is consistent with the given average for the quantity measured. */
+    bool Matches(double expected) const {
+        return std::abs(Mean() - expected) < MAX_STD_DEVS * StdError();
+    }
+};
+
+/** The share of the network hashrate controlled by a miner, between 0 and 1. */
+double Hashrate(const Miner& miner)
 {
-    std::random_device rd;
-    RNG rng{rd()};
-    constexpr int SAMPLE_COUNT{10'000};
-    constexpr int SAMPLE_SIZE{1'000};
-    constexpr int TOTAL_BLOCK_COUNT{100};
+    return miner.perc / 100.0;
+}
 
+/** Each miner must find a share of the blocks equal to its share of the network hashrate. */
+void TestMinerPicker()
+{
+    constexpr long BLOCK_COUNT{10'000'000};
+
+    // Both large and small miners.
     std::vector<Miner> miners;
-    miners.emplace_back(0, 12, 0s);
-    miners.emplace_back(1, 18, 0s);
-    miners.emplace_back(2, 20, 0s);
+    miners.emplace_back(0, 35, 0s);
+    miners.emplace_back(1, 20, 0s);
+    miners.emplace_back(2, 18, 0s);
     miners.emplace_back(3, 15, 0s);
-    miners.emplace_back(4, 35, 0s);
-    for (auto& miner: miners) {
-        miner.chain.reserve((TOTAL_BLOCK_COUNT + 99) / 100);
-        miner.chain.pop_back(); // drop the genesis block
+    miners.emplace_back(4, 11, 0s);
+    miners.emplace_back(5, 1, 0s);
+
+    // Count how many of the blocks each miner finds.
+    RNG rng{0};
+    std::vector<long> blocks_found(miners.size());
+    for (long i{0}; i < BLOCK_COUNT; ++i) {
+        blocks_found[PickFinder(miners, rng).id]++;
     }
 
-    std::vector<double> sample_means(miners.size()), sample_squared_means(miners.size());
-    for (int k{0}; k < SAMPLE_COUNT; ++k) {
-        std::vector<double> means(miners.size());
-        for (int j{0}; j < SAMPLE_SIZE; ++j) {
-            for (int i{0}; i < TOTAL_BLOCK_COUNT; ++i) {
-                auto& miner{PickFinder(miners, rng)};
-                miner.FoundBlock(0ms);
-            }
-
-            for (size_t i{0}; i < miners.size(); ++i) {
-                const auto block_count{miners[i].chain.size()};
-                means[i] += block_count;
-                miners[i].chain.clear();
-            }
-        }
-
-        for (size_t i{0}; i < miners.size(); ++i) {
-            means[i] /= SAMPLE_SIZE;
-            sample_means[i] += means[i];
-            sample_squared_means[i] += std::pow(means[i], 2);
-        }
+    for (const auto& miner: miners) {
+        assert(MatchesProbability(blocks_found[miner.id], BLOCK_COUNT, Hashrate(miner)));
     }
 
-    for (size_t i{0}; i < miners.size(); ++i) {
-        sample_means[i] /= SAMPLE_COUNT;
-        const auto sample_mean_perc{sample_means[i] / TOTAL_BLOCK_COUNT * 100};
-        sample_squared_means[i] /= SAMPLE_COUNT;
-        const double std_dev{std::sqrt(sample_squared_means[i] - std::pow(sample_means[i], 2))};
-        const double std_dev_perc{std_dev / TOTAL_BLOCK_COUNT * 100};
-        std::cout << std::fixed << "Miner " << miners[i].id << " with " << miners[i].perc << "% of the hashrate: ";
-        std::cout << std::fixed << "sample mean " << sample_means[i] << " (" << sample_mean_perc << "%), std dev of sample mean " << std_dev << " (" << std_dev_perc << "%)" << std::endl;
+    std::cout << "Miner picker tests passed." << std::endl;
+}
+
+/** The time between two blocks must follow an exponential distribution with a mean of BLOCK_INTERVAL. */
+void TestBlockInterval()
+{
+    constexpr long INTERVAL_COUNT{10'000'000};
+
+    RNG rng{0};
+    std::vector<std::chrono::milliseconds> intervals;
+    for (long i{0}; i < INTERVAL_COUNT; ++i) {
+        intervals.push_back(NextBlockInterval(rng));
     }
+
+    // Their mean must be 10 minutes.
+    Sample sample;
+    for (const auto interval: intervals) {
+        sample.Add(interval.count());
+    }
+    assert(sample.Matches(std::chrono::milliseconds{BLOCK_INTERVAL}.count()));
+
+    // Other distributions have the same mean. What makes this one exponential is that the probability for an
+    // interval to be shorter than a given duration is `1 - exp(-duration / mean)`. Check it for a few durations.
+    for (const std::chrono::seconds duration: {10s, 60s, 600s, 3600s}) {
+        const long shorter_count{std::ranges::count_if(intervals, [&](auto interval) { return interval < duration; })};
+        const double p_shorter{1 - std::exp(-std::chrono::duration<double>(duration) / BLOCK_INTERVAL)};
+        assert(MatchesProbability(shorter_count, INTERVAL_COUNT, p_shorter));
+    }
+
+    std::cout << "Block interval tests passed." << std::endl;
 }
 
 /* Run the simulation from main.cpp 100 times for two weeks. Take a 100 such samples. Compute the sample mean of the distribution of blocks found per miner. */
@@ -184,27 +176,6 @@ void SimpleSim()
         std::cout << std::fixed << "Miner " << miners[i].id << " with " << miners[i].perc << "% of the hashrate: ";
         std::cout << std::fixed << "sample mean " << sample_means[i] * 100 << " std dev of sample mean " << std_dev * 100 << std::endl;
     }
-}
-
-// Analyze a sample of the distribution of interval between blocks. We expect the mean to be 600'000 ms on average and
-// the standard deviation to be the same as this is an exponential distribution.
-void BlockIntervalSample()
-{
-    std::random_device rd;
-    RNG rng{rd()};
-    constexpr int SAMPLE_SIZE{100'000'000};
-
-    double mean{0.0}, squared_mean{0.0};
-    for (int i{0}; i < SAMPLE_SIZE; ++i) {
-        const auto interval{static_cast<double>(NextBlockInterval(rng).count())};
-        mean += interval;
-        squared_mean += std::pow(interval, 2);
-    }
-    mean /= SAMPLE_SIZE;
-    squared_mean /= SAMPLE_SIZE;
-
-    const double variance{squared_mean - std::pow(mean, 2)};
-    std::cout << std::fixed << "Mean " << mean << " std dev " << std::sqrt(variance) << std::endl;
 }
 
 /** Test our implementation of the "worst case" (gamma=0) selfish mining strategy. This goes over all the possible state in
@@ -423,10 +394,9 @@ void TestStaleBlocks()
 
 int main()
 {
-    //MinerPickerSample();
-    //BlockIntervalSample();
-    //MinerPickerSmallBig();
     //SimpleSim();
     TestSelfishStrategy();
     TestStaleBlocks();
+    TestMinerPicker();
+    TestBlockInterval();
 }
