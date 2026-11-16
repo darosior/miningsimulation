@@ -234,7 +234,7 @@ void TestSelfishMining()
     for (const int selfish_perc: {30, 40}) {
         // As in the paper, blocks propagate instantly.
         std::vector<Miner> miners;
-        miners.emplace_back(0, selfish_perc, 0s, true);
+        miners.emplace_back(0, selfish_perc, 0s, Strategy::SELFISH);
         miners.emplace_back(1, 70 - selfish_perc, 0s);
         miners.emplace_back(2, 20, 0s);
         miners.emplace_back(3, 10, 0s);
@@ -260,7 +260,7 @@ void TestSelfishStrategy()
 {
     constexpr int SM_ID{0}, OTHERS_ID{1};
     constexpr std::chrono::milliseconds SM_PROP_TIME{100ms};
-    Miner selfish_miner{SM_ID, 35, SM_PROP_TIME, true};
+    Miner selfish_miner{SM_ID, 35, SM_PROP_TIME, Strategy::SELFISH};
 
     /** Case (a), any state but two branches of length 1, pool finds a block. */
     // Start with a public chain of 2 blocks (+ genesis)
@@ -431,7 +431,7 @@ void TestSelfishStrategy()
 
     /** Case absent from the paper. The blocks of the selfish miner propagate instantly. A block he reveals in reaction
      * to one from the other miners must still arrive after it. */
-    Miner instant_selfish_miner{SM_ID, 35, 0ms, true};
+    Miner instant_selfish_miner{SM_ID, 35, 0ms, Strategy::SELFISH};
     // Set the chain of the selfish miner accordingly to a 1 block best chain with a 1-block private fork on top.
     instant_selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, SELFISH_ARRIVAL)};
 

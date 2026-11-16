@@ -38,6 +38,15 @@ struct Block {
     }
 };
 
+/** The strategy followed by a miner. */
+enum class Strategy {
+    //! Publish blocks as soon as they are found, and mine on top of the longest chain. In the event of a race,
+    //! always mine on top of its own block.
+    OWN_BLOCK_FIRST,
+    //! The (worst case) selfish mining strategy as described in section 3.2 of https://arxiv.org/pdf/1311.0243.
+    SELFISH,
+};
+
 /** The size of a chain and its last block. */
 struct ChainTip {
     size_t size;
@@ -57,14 +66,14 @@ struct Miner {
     std::chrono::milliseconds next_block;
     //! Number of blocks this miner created that were reorged out.
     int stale_blocks;
-    //! Whether this miner follows a (worst case) selfish mining strategy as described in section 3.2 of https://arxiv.org/pdf/1311.0243.
-    bool is_selfish;
+    //! The strategy followed by this miner.
+    Strategy strategy;
     //! The tip of the best published chain this miner was last notified of. A selfish miner needs it to
     //! tell whether it is in a race when it finds a block.
     ChainTip best_tip;
 
-    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, bool selfish = false)
-        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}, is_selfish{selfish}, best_tip{1, Block::Genesis()}
+    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, Strategy strategy_ = Strategy::OWN_BLOCK_FIRST)
+        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}, strategy{strategy_}, best_tip{1, Block::Genesis()}
     {}
 
     /** Add a block found at the given block time to this miner's local chain. */
@@ -72,7 +81,7 @@ struct Miner {
         // A selfish miner is in a race if its chain is the same size as the best published chain but ends
         // in a different block.
         const bool in_race{chain.size() == best_tip.size && chain.back() != best_tip.block};
-        if (is_selfish && !in_race) {
+        if (strategy == Strategy::SELFISH && !in_race) {
             // A selfish miner always withholds the blocks it finds, except in the case of a race.
             chain.emplace_back(id, SELFISH_ARRIVAL);
         } else {
@@ -157,7 +166,7 @@ struct Miner {
      * mines on top of a selfish miner's block). Paper available at https://arxiv.org/pdf/1311.0243.
      */
     void MaybeSelfishReveal(std::span<const Block> best_chain, std::chrono::milliseconds cur_time) {
-        if (!is_selfish) return;
+        if (strategy != Strategy::SELFISH) return;
 
         // If their chain is already longer than ours, we have to switch. The selfish blocks will be
         // overwritten by MaybeReorg().
@@ -292,9 +301,9 @@ bool AnyBlockInFlight(const std::vector<Miner>& miners, std::chrono::millisecond
 {
     for (const auto& miner: miners) {
         const auto unpublished_blocks{miner.UnpublishedBlocks(cur_time)};
-        if (!miner.is_selfish && unpublished_blocks > 0) {
+        if (miner.strategy != Strategy::SELFISH && unpublished_blocks > 0) {
             return true;
-        } else if (miner.is_selfish && unpublished_blocks > miner.SelfishBlocks()) {
+        } else if (miner.strategy == Strategy::SELFISH && unpublished_blocks > miner.SelfishBlocks()) {
             return true;
         }
     }

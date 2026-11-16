@@ -76,7 +76,7 @@ int main()
         const auto& stats{stats_total[i]};
         std::cout << "  - Miner " << miner.id << " (" << miner.perc << "% of network hashrate) found " << stats.blocks_found / SIM_RUNS << " blocks i.e. ";
         std::cout << stats.blocks_share * 100 / SIM_RUNS << "% of blocks. Stale rate: " << stats.stale_rate * 100 / SIM_RUNS << "%.";
-        if (miner.is_selfish) std::cout << " ('selfish mining' strategy)";
+        if (miner.strategy == Strategy::SELFISH) std::cout << " ('selfish mining' strategy)";
         std::cout << std::endl;
     }
 }
