@@ -70,8 +70,12 @@ struct BlockTree {
 /** The strategy followed by a miner. */
 enum class Strategy {
     //! Publish blocks as soon as they are found, and mine on top of the longest chain. In the event of a race,
-    //! always mine on top of its own block.
+    //! always mine on top of its own block. A miner can get this from Bitcoin Core using `preciousblock`.
     OWN_BLOCK_FIRST,
+    //! Same, but in the event of a race mine on top of the block its node received first even if it is not its
+    //! own. This is Bitcoin Core's default behaviour. It only makes a difference for a miner whose hashers are
+    //! behind its node, see `Miner::submit_delay` and `Miner::work_delay`.
+    FIRST_SEEN,
     //! The (worst case) selfish mining strategy as described in section 3.2 of https://arxiv.org/pdf/1311.0243.
     SELFISH,
 };
@@ -134,16 +138,17 @@ struct Miner {
         // Our hashers were not working on top of the last block of our chain when they found this one, as
         // they had not received work on top of it yet. The block does not make our chain longer. If it makes
         // it the same size as a chain ending in another miner's block we are in a race: switch to our own
-        // block and publish it.
+        // block and publish it, unless we stick to the first block received.
         const bool race_with_other{blocks.Height(block) == blocks.Height(tip) && blocks.MinerId(tip) != id};
-        if (race_with_other) {
+        if (race_with_other && strategy != Strategy::FIRST_SEEN) {
             tip = block;
             withheld_blocks = 0;
             return tip;
         }
 
-        // Otherwise the block is stale: either our chain is already longer, or it ends in another block of
-        // ours which we keep as other miners may already be working on top of it.
+        // Otherwise the block is stale: either our chain is already longer, or it ends in a block we received
+        // first and stick to, or it ends in another block of ours which we keep as other miners may already be
+        // working on top of it.
         return std::nullopt;
     }
 

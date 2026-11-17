@@ -260,6 +260,61 @@ void TestInternalDelays()
     std::cout << "Internal delays tests passed." << std::endl;
 }
 
+/** A miner which sticks to the first block received must do exactly as well as one which mines on top of its own
+ * block in a race, as long as its hashers are not behind its node. If they are, it must lose every block which
+ * competes with another miner's. */
+void TestFirstSeenMining()
+{
+    constexpr std::chrono::seconds PROPAGATION{10};
+
+    // Without delays between its node and its hashers, the miner never finds a block after its node received a
+    // competing one. Whichever its strategy, every miner must end up with the very same blocks and stale blocks.
+    for (uint64_t seed{0}; seed < 100; ++seed) {
+        std::vector<MinerStats> results[2];
+        for (const auto strategy: {Strategy::OWN_BLOCK_FIRST, Strategy::FIRST_SEEN}) {
+            std::vector<Miner> miners;
+            miners.emplace_back(0, 50, PROPAGATION, strategy);
+            miners.emplace_back(1, 30, PROPAGATION);
+            miners.emplace_back(2, 20, PROPAGATION);
+            results[strategy == Strategy::FIRST_SEEN] = RunSimulation(SIM_DURATION, miners, seed);
+        }
+        for (size_t i{0}; i < results[0].size(); ++i) {
+            assert(results[0][i].blocks_found == results[1][i].blocks_found);
+            assert(results[0][i].stale_rate == results[1][i].stale_rate);
+        }
+    }
+
+    // Same setting as in TestInternalDelays(), but the delayed miner sticks to the first block received.
+    constexpr std::chrono::seconds SUBMIT_DELAY{4}, WORK_DELAY{6};
+    std::vector<Miner> miners;
+    miners.emplace_back(0, 50, 0s, Strategy::FIRST_SEEN, SUBMIT_DELAY, WORK_DELAY);
+    miners.emplace_back(1, 30, 0s);
+    miners.emplace_back(2, 20, 0s);
+
+    // The probability that miners with this share of the network hashrate find a block within the two delays.
+    const auto p_block_within_delays = [&](double hashrate) {
+        return 1 - std::exp(-hashrate * (SUBMIT_DELAY + WORK_DELAY) / BLOCK_INTERVAL);
+    };
+    const double hashrate{Hashrate(miners[0])};
+
+    // When a block of the delayed miner competes with a block found by another miner, its node always receives
+    // the other one first (blocks propagate instantly between miners). Its own block always goes stale, whereas
+    // a miner which mines on top of its own block keeps it when it also finds the next one.
+    double expected_stale_rate{p_block_within_delays(1 - hashrate)};
+    // As with the other strategy, its hashers may find a second block before they start working on top of the first.
+    expected_stale_rate += p_block_within_delays(hashrate);
+
+    const auto results{RunSimulations(miners)};
+    assert(std::abs(results[0].stale_rate.Mean() / expected_stale_rate - 1) < 0.05);
+    // The other miners never see the blocks it gives up: none of theirs go stale, but those found the very same
+    // millisecond as another one.
+    for (size_t i{1}; i < miners.size(); ++i) {
+        assert(results[i].stale_rate.Mean() < 1.0 / 100'000);
+    }
+
+    std::cout << "First seen mining tests passed." << std::endl;
+}
+
 /** The share of blocks expected for a selfish miner with a share `alpha` of the network hashrate. This is the
  * revenue of the pool given by equation (8) in the 2013 paper (https://arxiv.org/pdf/1311.0243) for gamma=0, i.e.
  * when no other miner ever mines on top of the selfish miner's block in a race. */
@@ -561,6 +616,23 @@ void TestHashersBehindNode()
         assert(miner.StaleBlocks(blocks) == 0);
     }
 
+    /** Same, for a miner which sticks to the first block its node received. */
+    {
+        BlockTree blocks;
+        Miner miner{MINER_ID, 30, 1s, Strategy::FIRST_SEEN};
+
+        // The node of the miner receives a block from another miner and switches to it.
+        const BlockId other_block{blocks.Add(OTHER_ID, GENESIS)};
+        miner.ReceivedBlock(blocks, other_block);
+
+        // Its hashers are still working on top of the previous block, and find one. The node received the other
+        // block first and sticks to it: the miner's own block is not published, it is stale.
+        const BlockId miner_block{blocks.Add(MINER_ID, miner.work_tip)};
+        assert(!miner.FoundBlock(blocks, miner_block));
+        assert(miner.tip == other_block);
+        assert(miner.StaleBlocks(blocks) == 1);
+    }
+
     /** The hashers have not received work on top of a block they found. */
     {
         BlockTree blocks;
@@ -616,5 +688,6 @@ int main()
     TestInstantPropagation();
     TestPropagationDelay();
     TestInternalDelays();
+    TestFirstSeenMining();
     TestSelfishMining();
 }
