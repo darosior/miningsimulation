@@ -253,194 +253,213 @@ void TestSelfishMining()
     std::cout << "Selfish mining tests passed." << std::endl;
 }
 
+/** Add a chain of blocks on top of the given block, one for each of the given miners. Returns its last block. */
+BlockId AddBlocks(BlockTree& blocks, BlockId parent, std::initializer_list<unsigned> miner_ids)
+{
+    for (const auto miner_id: miner_ids) {
+        parent = blocks.Add(miner_id, parent);
+    }
+    return parent;
+}
+
+/** A selfish miner whose chain is the published chain ending in `public_tip`, followed by a number of blocks
+ * it found on top of it and did not publish. */
+Miner SelfishMiner(BlockTree& blocks, unsigned id, BlockId public_tip, size_t withheld_blocks)
+{
+    Miner selfish_miner{id, 35, 100ms, Strategy::SELFISH};
+    selfish_miner.ReceivedBlock(blocks, public_tip);
+    for (size_t i{0}; i < withheld_blocks; ++i) {
+        selfish_miner.FoundBlock(blocks);
+    }
+    assert(selfish_miner.withheld_blocks == withheld_blocks);
+    return selfish_miner;
+}
+
 /** Test our implementation of the "worst case" (gamma=0) selfish mining strategy. This goes over all the possible state in
  * model presented in section 4.2 of the 2013 paper. We also exercise some scenarii not present in the 2013 paper's model.
  */
 void TestSelfishStrategy()
 {
     constexpr int SM_ID{0}, OTHERS_ID{1};
-    constexpr std::chrono::milliseconds SM_PROP_TIME{100ms};
-    Miner selfish_miner{SM_ID, 35, SM_PROP_TIME, Strategy::SELFISH};
+    BlockTree blocks;
 
     /** Case (a), any state but two branches of length 1, pool finds a block. */
-    // Start with a public chain of 2 blocks (+ genesis)
-    selfish_miner.chain.emplace_back(OTHERS_ID, 600s);
-    selfish_miner.chain.emplace_back(SM_ID, 600s * 2);
+    {
+        // Start with a public chain of 2 blocks (+ genesis)
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 0)};
 
-    // Private fork of 0 block, best chain fork of 0 block, pool finds a block. "The pool appends
-    // one block to its private branch, increasing its lead on the public branch by one."
-    selfish_miner.FoundBlock(600s * 3);
-    assert(selfish_miner.chain.size() == 4);
-    assert(selfish_miner.chain[3].miner_id == SM_ID && selfish_miner.chain[3].arrival == SELFISH_ARRIVAL);
+        // Private fork of 0 block, best chain fork of 0 block, pool finds a block. "The pool appends
+        // one block to its private branch, increasing its lead on the public branch by one."
+        assert(!selfish_miner.FoundBlock(blocks)); // Not published.
+        assert(blocks.Height(selfish_miner.tip) == 3);
+        assert(selfish_miner.withheld_blocks == 1);
 
-    // Private chain of 1 block, best chain fork of 0 block, pool finds a block. "The pool appends
-    // one block to its private branch, increasing its lead on the public branch by one."
-    selfish_miner.FoundBlock(600s * 4);
-    assert(selfish_miner.chain.size() == 5);
-    std::vector<Block> expected_chain{Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)};
-    assert(selfish_miner.chain == expected_chain);
+        // Private chain of 1 block, best chain fork of 0 block, pool finds a block. "The pool appends
+        // one block to its private branch, increasing its lead on the public branch by one."
+        assert(!selfish_miner.FoundBlock(blocks));
+        assert(blocks.Height(selfish_miner.tip) == 4);
+        assert(selfish_miner.withheld_blocks == 2);
+        // Its chain is the public chain followed by its two blocks.
+        assert(blocks.MinerId(selfish_miner.tip) == SM_ID);
+        assert(blocks.MinerId(blocks.Parent(selfish_miner.tip)) == SM_ID);
+        assert(blocks.Ancestor(selfish_miner.tip, 2) == public_tip);
+    }
 
     /** Case (b), was two branches of length 1, pool finds a block. */
-    // Set the chain of the selfish miner accordingly to a 4 blocks best chain and its 1-block fork on top.
-    selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, SELFISH_ARRIVAL)};
+    {
+        // A selfish miner with a 1-block private fork on top of a 3 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID, OTHERS_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 1)};
+        const BlockId selfish_block{selfish_miner.tip};
 
-    // The others find a block too. The selfish miner reveals his (see case (f) below) and there are now two
-    // branches of length 1.
-    std::vector<Block> best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(OTHERS_ID, 600s*4)};
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*4);
+        // The others find a block too. The selfish miner reveals his (see case (f) below) and there are now two
+        // branches of length 1.
+        const BlockId others_block{blocks.Add(OTHERS_ID, public_tip)};
+        assert(selfish_miner.ReceivedBlock(blocks, others_block) == selfish_block);
 
-    // Now the selfish miner finds a block. "The pool publishes its secret branch of length two".
-    selfish_miner.FoundBlock(600s * 5);
-    expected_chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3),
-        Block(SM_ID, 600s*4 + SM_PROP_TIME), Block(SM_ID, 600s*5 + SM_PROP_TIME)
-    };
-    assert(selfish_miner.chain == expected_chain);
+        // Now the selfish miner finds a block. "The pool publishes its secret branch of length two".
+        const auto published{selfish_miner.FoundBlock(blocks)};
+        assert(published == selfish_miner.tip);
+        assert(blocks.Parent(selfish_miner.tip) == selfish_block);
+        assert(selfish_miner.withheld_blocks == 0);
 
-    // He won the race, and is back to withholding the blocks he finds.
-    selfish_miner.FoundBlock(600s * 6);
-    expected_chain.emplace_back(SM_ID, SELFISH_ARRIVAL);
-    assert(selfish_miner.chain == expected_chain);
+        // The others receive it, and so does he. He won the race, and is back to withholding the blocks he finds.
+        assert(!selfish_miner.ReceivedBlock(blocks, *published));
+        assert(!selfish_miner.FoundBlock(blocks));
+        assert(selfish_miner.withheld_blocks == 1);
+    }
 
     /** Case (c), was two branches of length 1, others find a block after pool head. */
     // This never happens in our simulation since we only implement gamma=0
 
     /** Case (d), was two branches of length 1, others find a block after others’ head. */
-    // Set the chain of the selfish miner accordingly to a 4 blocks best chain and its 1-block fork on top.
-    selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, SELFISH_ARRIVAL)};
+    {
+        // A selfish miner with a 1-block private fork on top of a 3 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID, OTHERS_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 1)};
 
-    // The others find a block too. The selfish miner reveals his and there are now two branches of length 1.
-    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(OTHERS_ID, 600s*4)};
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*4);
+        // The others find a block too. The selfish miner reveals his and there are now two branches of length 1.
+        const BlockId others_block{blocks.Add(OTHERS_ID, public_tip)};
+        assert(selfish_miner.ReceivedBlock(blocks, others_block) == selfish_miner.tip);
 
-    // Now the selfish miner is notified of a longer best chain with the last two blocks being the others'. He
-    // switches to mining on top of it.
-    best_chain.emplace_back(OTHERS_ID, 600s*5);
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*5);
-    assert(selfish_miner.chain == best_chain);
+        // Now the selfish miner is notified of a longer best chain with the last two blocks being the others'. He
+        // switches to mining on top of it.
+        const BlockId others_next_block{blocks.Add(OTHERS_ID, others_block)};
+        assert(!selfish_miner.ReceivedBlock(blocks, others_next_block));
+        assert(selfish_miner.tip == others_next_block);
 
-    // He lost the race, and is back to withholding the blocks he finds.
-    selfish_miner.FoundBlock(600s * 6);
-    expected_chain = best_chain;
-    expected_chain.emplace_back(SM_ID, SELFISH_ARRIVAL);
-    assert(selfish_miner.chain == expected_chain);
+        // He lost the race, and is back to withholding the blocks he finds.
+        assert(!selfish_miner.FoundBlock(blocks));
+        assert(blocks.Parent(selfish_miner.tip) == others_next_block);
+        assert(selfish_miner.withheld_blocks == 1);
+    }
 
     /** Case (e), no private branch, others find a block. */
-    // Set the chain of the selfish miner accordingly to a 5 blocks best chain with no private fork on top.
-    selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, 600s*4)};
+    {
+        // A selfish miner with no private fork on top of a 4 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID, OTHERS_ID, SM_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 0)};
 
-    // Now the selfish miner is notified of a longer best chain with the last block being the other's. He
-    // switches to mining on top of it.
-    best_chain = selfish_miner.chain;
-    best_chain.emplace_back(OTHERS_ID, 600s*5);
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*5);
-    assert(selfish_miner.chain == best_chain);
+        // Now the selfish miner is notified of a longer best chain with the last block being the other's. He
+        // switches to mining on top of it.
+        const BlockId others_block{blocks.Add(OTHERS_ID, public_tip)};
+        assert(!selfish_miner.ReceivedBlock(blocks, others_block));
+        assert(selfish_miner.tip == others_block);
+    }
 
     /** Case (f), lead was 1, others find a block. "Now there are two branches of length one, and the pool
      * publishes its single secret block." */
-    // Set the chain of the selfish miner accordingly to a 3 blocks best chain with a 1-block private fork on top.
-    selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, SELFISH_ARRIVAL)};
+    {
+        // A selfish miner with a 1-block private fork on top of a 2 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 1)};
+        const BlockId selfish_block{selfish_miner.tip};
 
-    // Now the selfish miner is notified of an equal-size best chain with the last block being the others'. He reveals
-    // his last block and continues mining on top of it.
-    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3)};
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*3);
-    expected_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, 600s*3 + SM_PROP_TIME)};
-    assert(selfish_miner.chain == expected_chain);
+        // Now the selfish miner is notified of an equal-size best chain with the last block being the others'. He reveals
+        // his last block and continues mining on top of it.
+        const BlockId others_block{blocks.Add(OTHERS_ID, public_tip)};
+        assert(selfish_miner.ReceivedBlock(blocks, others_block) == selfish_block);
+        assert(selfish_miner.tip == selfish_block);
+        assert(selfish_miner.withheld_blocks == 0);
+    }
 
     /** Case (g), lead was 2, others find a block. "The others almost close the gap as the lead drops to 1.
      * The pool publishes its secret blocks, causing everybody to start mining at the head of the previously
      * private branch, since it is longer". */
-    // Set the chain of the selfish miner accordingly to a 3 blocks best chain with a 2-blocks private fork on top.
-    selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)};
+    {
+        // A selfish miner with a 2-blocks private fork on top of a 2 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 2)};
+        const BlockId selfish_tip{selfish_miner.tip};
 
-    // Now the selfish miner is notified of a best public chain with only one block less than his private chain.
-    // He reveals all his private blocks.
-    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3)};
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*3);
-    expected_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, 600s*3 + SM_PROP_TIME), Block(SM_ID, 600s*3 + SM_PROP_TIME)};
-    assert(selfish_miner.chain == expected_chain);
+        // Now the selfish miner is notified of a best public chain with only one block less than his private chain.
+        // He reveals all his private blocks.
+        const BlockId others_block{blocks.Add(OTHERS_ID, public_tip)};
+        assert(selfish_miner.ReceivedBlock(blocks, others_block) == selfish_tip);
+        assert(selfish_miner.tip == selfish_tip);
+        assert(selfish_miner.withheld_blocks == 0);
+    }
 
     /** Case (h), lead was more than 2, others win. The others decrease the lead, which remains at least two.
      * The new block (say with number i) will end outside the chain once the pool publishes its entire branch. */
-    // Set the chain of the selfish miner accordingly to a 3 blocks best chain with a 3-block private fork on top.
-    selfish_miner.chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, SELFISH_ARRIVAL),
-        Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)
-    };
+    {
+        // A selfish miner with a 3-blocks private fork on top of a 2 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 3)};
+        const BlockId selfish_tip{selfish_miner.tip};
 
-    // Now the selfish miner is notified of a best public chain with two blocks less than his private chain. He reveals
-    // the oldest block and keeps mining on its private fork.
-    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3)};
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*3);
-    expected_chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(SM_ID, 600s*3 + SM_PROP_TIME),
-        Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)
-    };
-    assert(selfish_miner.chain == expected_chain);
+        // Now the selfish miner is notified of a best public chain with two blocks less than his private chain. He reveals
+        // the oldest block and keeps mining on its private fork.
+        const BlockId others_block{blocks.Add(OTHERS_ID, public_tip)};
+        const BlockId oldest_selfish_block{blocks.Ancestor(selfish_tip, 3)};
+        assert(selfish_miner.ReceivedBlock(blocks, others_block) == oldest_selfish_block);
+        assert(selfish_miner.tip == selfish_tip);
+        assert(selfish_miner.withheld_blocks == 2);
+    }
+    {
+        // A selfish miner with a 5-blocks private fork on top of a 3 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID, OTHERS_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 5)};
+        const BlockId selfish_tip{selfish_miner.tip};
 
-    // Set the chain of the selfish miner accordingly to a 4 blocks best chain with a 5-block private fork on top.
-    selfish_miner.chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, SELFISH_ARRIVAL),
-        Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)
-    };
-
-    // Now the selfish miner is notified of a best public chain with four blocks less than his private chain. He reveals
-    // the oldest block and keeps mining on its private fork.
-    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(OTHERS_ID, 600s*4)};
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*4);
-    expected_chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, 600s*4 + SM_PROP_TIME),
-        Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)
-    };
-    assert(selfish_miner.chain == expected_chain);
+        // Now the selfish miner is notified of a best public chain with four blocks less than his private chain. He reveals
+        // the oldest block and keeps mining on its private fork.
+        const BlockId others_block{blocks.Add(OTHERS_ID, public_tip)};
+        const BlockId oldest_selfish_block{blocks.Ancestor(selfish_tip, 4)};
+        assert(selfish_miner.ReceivedBlock(blocks, others_block) == oldest_selfish_block);
+        assert(selfish_miner.tip == selfish_tip);
+        assert(selfish_miner.withheld_blocks == 4);
+    }
 
     /** Case absent from the paper. Same as above but the rest of the network found two blocks in a row. */
-    // Set the chain of the selfish miner accordingly to a 4 blocks best chain with a 5-block private fork on top.
-    selfish_miner.chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, SELFISH_ARRIVAL),
-        Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)
-    };
+    {
+        // A selfish miner with a 5-blocks private fork on top of a 3 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID, OTHERS_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 5)};
+        const BlockId selfish_tip{selfish_miner.tip};
 
-    // Now the selfish miner is notified of a best public chain with four blocks less than his private chain. He reveals
-    // the oldest block and keeps mining on its private fork.
-    best_chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3),
-        Block(OTHERS_ID, 600s*4), Block(OTHERS_ID, 600s*5)
-    };
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*5);
-    expected_chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, 600s*5 + SM_PROP_TIME),
-        Block(SM_ID, 600s*5 + SM_PROP_TIME), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL), Block(SM_ID, SELFISH_ARRIVAL)
-    };
-    assert(selfish_miner.chain == expected_chain);
+        // Now the selfish miner is notified of a best public chain with three blocks less than his private chain. He
+        // reveals the two oldest blocks and keeps mining on its private fork.
+        const BlockId others_tip{AddBlocks(blocks, public_tip, {OTHERS_ID, OTHERS_ID})};
+        const BlockId second_selfish_block{blocks.Ancestor(selfish_tip, 5)};
+        assert(selfish_miner.ReceivedBlock(blocks, others_tip) == second_selfish_block);
+        assert(selfish_miner.tip == selfish_tip);
+        assert(selfish_miner.withheld_blocks == 3);
+    }
 
     /** Case absent from the paper. Selfish miner has a 1-block lead and other miners find two blocks in a row. */
-    // Set the chain of the selfish miner accordingly to a 4 blocks best chain with a 1-block private fork on top.
-    selfish_miner.chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3), Block(SM_ID, SELFISH_ARRIVAL),
-    };
+    {
+        // A selfish miner with a 1-block private fork on top of a 3 blocks public chain.
+        const BlockId public_tip{AddBlocks(blocks, GENESIS, {OTHERS_ID, SM_ID, OTHERS_ID})};
+        Miner selfish_miner{SelfishMiner(blocks, SM_ID, public_tip, 1)};
 
-    // Now the selfish miner is notified of a best public chain with 1 block more than his private one. He switches to it.
-    best_chain = {
-        Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2), Block(OTHERS_ID, 600s*3),
-        Block(OTHERS_ID, 600s*4), Block(OTHERS_ID, 600s*5)
-    };
-    selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*5);
-    assert(selfish_miner.chain == best_chain);
-
-    /** Case absent from the paper. The blocks of the selfish miner propagate instantly. A block he reveals in reaction
-     * to one from the other miners must still arrive after it. */
-    Miner instant_selfish_miner{SM_ID, 35, 0ms, Strategy::SELFISH};
-    // Set the chain of the selfish miner accordingly to a 1 block best chain with a 1-block private fork on top.
-    instant_selfish_miner.chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, SELFISH_ARRIVAL)};
-
-    // Now the selfish miner is notified of an equal-size best chain with the last block being the others'. He reveals
-    // his block, which arrives right after the others'.
-    best_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(OTHERS_ID, 600s*2)};
-    instant_selfish_miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 600s*2);
-    expected_chain = {Block::Genesis(), Block(OTHERS_ID, 600s), Block(SM_ID, 600s*2 + 1ms)};
-    assert(instant_selfish_miner.chain == expected_chain);
+        // Now the selfish miner is notified of a best public chain with 1 block more than his private one. He switches to it.
+        const BlockId others_tip{AddBlocks(blocks, public_tip, {OTHERS_ID, OTHERS_ID})};
+        assert(!selfish_miner.ReceivedBlock(blocks, others_tip));
+        assert(selfish_miner.tip == others_tip);
+        assert(selfish_miner.withheld_blocks == 0);
+    }
 
     std::cout << "Selfish mining strategy tests passed." << std::endl;
 }
@@ -449,20 +468,21 @@ void TestSelfishStrategy()
 void TestStaleBlocks()
 {
     constexpr int MINER_ID{0}, OTHER_A{1}, OTHER_B{2};
+    BlockTree blocks;
     Miner miner{MINER_ID, 30, 1s};
 
     // The miner finds a block but the 2-blocks chain of another miner is propagated first. Its block is stale.
-    miner.FoundBlock(600s);
-    std::vector<Block> best_chain = {Block::Genesis(), Block(OTHER_A, 601s + 500ms), Block(OTHER_A, 602s + 200ms)};
-    miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 602s + 200ms);
-    assert(miner.chain == best_chain);
-    assert(miner.stale_blocks == 1);
+    const BlockId miner_block{*miner.FoundBlock(blocks)};
+    const BlockId other_chain{AddBlocks(blocks, GENESIS, {OTHER_A, OTHER_A})};
+    miner.ReceivedBlock(blocks, other_chain);
+    assert(miner.tip == other_chain);
+    assert(miner.StaleBlocks(blocks) == 1);
 
     // A third miner kept mining on top of the miner's block, and now has the longest chain. Its block is not stale anymore.
-    best_chain = {Block::Genesis(), Block(MINER_ID, 601s), Block(OTHER_B, 602s + 500ms), Block(OTHER_B, 611s)};
-    miner.NotifyBestChain({best_chain.begin(), best_chain.end()}, 611s);
-    assert(miner.chain == best_chain);
-    assert(miner.stale_blocks == 0);
+    const BlockId third_chain{AddBlocks(blocks, miner_block, {OTHER_B, OTHER_B})};
+    miner.ReceivedBlock(blocks, third_chain);
+    assert(miner.tip == third_chain);
+    assert(miner.StaleBlocks(blocks) == 0);
 
     std::cout << "Stale blocks accounting tests passed." << std::endl;
 }

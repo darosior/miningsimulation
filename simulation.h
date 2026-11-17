@@ -3,10 +3,9 @@
 #include <chrono>
 #include <optional>
 #include <limits>
-#include <memory>
 #include <random>
 #include <ranges>
-#include <span>
+#include <vector>
 
 #include "xoroshiro128++.h"
 
@@ -16,25 +15,55 @@ using namespace std::chrono_literals;
 static constexpr std::chrono::seconds BLOCK_INTERVAL{600};
 //! We use integers in [0;100] for percentages. This is the multiplier to map them to [0; uint64_t::MAX].
 static constexpr uint64_t PERC_MULTIPLIER{std::numeric_limits<uint64_t>::max() / 100};
-//! Arrival time to use for unpublished blocks by a selfish miner.
-static constexpr std::chrono::milliseconds SELFISH_ARRIVAL{std::chrono::milliseconds::max()};
+//! A block is identified by its position among all the blocks found during a simulation, see `BlockTree`.
+using BlockId = size_t;
+//! The genesis block, not created by any miner and which all miners start mining on top of.
+static constexpr BlockId GENESIS{0};
 
 struct Block {
     //! Which miner created this block.
     unsigned miner_id;
-    //! At what point will all other miners receive this block.
-    std::chrono::milliseconds arrival;
+    //! The block this one was found on top of.
+    BlockId parent;
+    //! How many blocks there are before this one in its chain.
+    size_t height;
+};
 
-    explicit Block(unsigned id, std::chrono::milliseconds time): miner_id{id}, arrival{time} {}
+/** All the blocks found during a simulation. Each block records the one it was found on top of: a chain is
+ * identified by its last block, and two competing chains are two branches of this tree. */
+struct BlockTree {
+    std::vector<Block> blocks;
 
-    //! Create the genesis block, not created by any miner and always received immediately.
-    static Block Genesis() {
-        return Block(std::numeric_limits<unsigned>::max(), 0s);
+    explicit BlockTree(): blocks{Block{std::numeric_limits<unsigned>::max(), GENESIS, 0}} {}
+
+    /** Record a block found by this miner on top of the given block. */
+    BlockId Add(unsigned miner_id, BlockId parent) {
+        blocks.push_back(Block{miner_id, parent, Height(parent) + 1});
+        return blocks.size() - 1;
     }
 
-    bool operator==(const Block& other) const {
-        // FIXME: should we have a block uid for when a single miner finds two blocks in a row with the same timestamp?
-        return miner_id == other.miner_id && arrival == other.arrival;
+    unsigned MinerId(BlockId block) const { return blocks[block].miner_id; }
+
+    BlockId Parent(BlockId block) const { return blocks[block].parent; }
+
+    size_t Height(BlockId block) const { return blocks[block].height; }
+
+    /** The block at the given height in the chain which ends in `tip`. */
+    BlockId Ancestor(BlockId tip, size_t height) const {
+        assert(height <= Height(tip));
+        while (Height(tip) > height) {
+            tip = Parent(tip);
+        }
+        return tip;
+    }
+
+    /** How many blocks of the chain which ends in `tip` were found by this miner. */
+    long BlocksFoundBy(unsigned miner_id, BlockId tip) const {
+        long count{0};
+        for (; tip != GENESIS; tip = Parent(tip)) {
+            if (MinerId(tip) == miner_id) ++count;
+        }
+        return count;
     }
 };
 
@@ -47,183 +76,102 @@ enum class Strategy {
     SELFISH,
 };
 
-/** The size of a chain and its last block. */
-struct ChainTip {
-    size_t size;
-    Block block;
-};
-
 struct Miner {
     //! Miner identifier used to track which miner created a certain block.
     unsigned id;
     //! Share of the total network hashrate controlled by the miner, as an integer between 0 and 100.
     uint64_t perc;
-    //! The time for blocks produced by this miner to reach all other miners.
+    //! The time for blocks published by this miner to reach all other miners.
     std::chrono::milliseconds propagation;
-    //! Local chain on the miner's full node. May differ slightly between miners due to propagation time.
-    std::vector<Block> chain;
-    //! The next time this miner will find a block, sampled from an exponential distribution parameterized by its share of total network hashrate.
-    std::chrono::milliseconds next_block;
-    //! Number of blocks this miner created that were reorged out.
-    int stale_blocks;
     //! The strategy followed by this miner.
     Strategy strategy;
-    //! The tip of the best published chain this miner was last notified of. A selfish miner needs it to
-    //! tell whether it is in a race when it finds a block.
-    ChainTip best_tip;
+    //! The last block of this miner's chain, which it is mining on top of. May differ slightly between miners
+    //! due to propagation time. For a selfish miner the last blocks of this chain may not be published.
+    BlockId tip{GENESIS};
+    //! The last block of the best published chain this miner knows of. A selfish miner compares its own
+    //! chain to it.
+    BlockId public_tip{GENESIS};
+    //! How many blocks at the end of its chain a selfish miner has not published yet. NOTE: this is not
+    //! `privateBranchLen` from the paper's algorithm, which also counts the blocks of the private branch
+    //! that were already published.
+    size_t withheld_blocks{0};
+    //! How many blocks this miner found.
+    long blocks_found{0};
 
     explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, Strategy strategy_ = Strategy::OWN_BLOCK_FIRST)
-        : id{id_}, perc{perc_}, propagation{prop}, chain{{Block::Genesis()}}, stale_blocks{0}, strategy{strategy_}, best_tip{1, Block::Genesis()}
+        : id{id_}, perc{perc_}, propagation{prop}, strategy{strategy_}
     {}
 
-    /** Add a block found at the given block time to this miner's local chain. */
-    void FoundBlock(std::chrono::milliseconds block_time) {
+    /** Find a block on top of this miner's chain. Returns this block if the miner publishes it. */
+    std::optional<BlockId> FoundBlock(BlockTree& blocks) {
         // A selfish miner is in a race if its chain is the same size as the best published chain but ends
         // in a different block.
-        const bool in_race{chain.size() == best_tip.size && chain.back() != best_tip.block};
+        const bool in_race{blocks.Height(tip) == blocks.Height(public_tip) && tip != public_tip};
+        tip = blocks.Add(id, tip);
+        blocks_found++;
+
         if (strategy == Strategy::SELFISH && !in_race) {
             // A selfish miner always withholds the blocks it finds, except in the case of a race.
-            chain.emplace_back(id, SELFISH_ARRIVAL);
-        } else {
-            // A selfish miner which finds a block while in a race publishes it immediately, as its chain
-            // is now the longest. The blocks before it were already revealed by MaybeSelfishReveal().
-            chain.emplace_back(id, block_time + propagation);
+            withheld_blocks++;
+            return std::nullopt;
         }
-    }
-
-    /** Count the number of not-yet-propagated blocks in this miner's local chain. */
-    int UnpublishedBlocks(std::chrono::milliseconds cur_time) const {
-        int unpublished_blocks{0};
-        for (const auto& block: std::views::reverse(chain)) {
-            // Arrival time is monotonic, don't bother doing useless work.
-            if (block.arrival <= cur_time) {
-                break;
-            }
-            unpublished_blocks++;
-        }
-        return unpublished_blocks;
-    }
-
-    /** The earliest block published by this miner that has not yet propagated to the network, if any. */
-    std::optional<std::chrono::milliseconds> NextArrival(std::chrono::milliseconds cur_time) const {
-        std::optional<std::chrono::milliseconds> earliest_arrival{};
-        for (const auto& block: std::views::reverse(chain)) {
-            // Arrival time is monotonic.
-            if (block.arrival <= cur_time) {
-                break;
-            }
-            earliest_arrival = block.arrival;
-        }
-        return earliest_arrival;
-    }
-
-    /** Number of blocks a selfish miner has not revealed yet. NOTE: this is not `privateBranchLen` from the
-     * paper's algorithm, which also counts the blocks of the private branch that were already revealed. */
-    size_t SelfishBlocks() const {
-        size_t selfish_blocks{0};
-        for (const auto& block: std::views::reverse(chain)) {
-            // Selfish blocks are always ever at the end of the chain.
-            if (block.arrival != SELFISH_ARRIVAL) {
-                break;
-            }
-            ++selfish_blocks;
-        }
-        return selfish_blocks;
-    }
-
-    /** Get the chain from this miner, except for the block that were not yet propagated. */
-    std::span<const Block> PublishedChain(std::chrono::milliseconds cur_time) const {
-        int unpublished_blocks{UnpublishedBlocks(cur_time)};
-        return std::span{chain}.first(chain.size() - unpublished_blocks);
-    }
-
-    /** Replace our chain if another miner's fully-propagated one is longer. */
-    void MaybeReorg(std::span<const Block> best_chain) {
-        // Of course we assume all blocks are at the same difficulty.
-        if (best_chain.size() <= chain.size()) return;
-
-        // Find the point of agreement between the two chains.
-        for (size_t i{chain.size()}; i > 0; --i) {
-            if (chain.back() == best_chain[i - 1]) {
-                break;
-            }
-            if (chain.back().miner_id == id) stale_blocks++;
-            chain.pop_back();
-        }
-
-        // Adopt the best chain. NOTE: it may contain a block of ours we had dropped for another chain,
-        // and counted as stale, if another miner kept mining on top of it.
-        assert(best_chain.size() > chain.size()); // Checked above.
-        for (size_t i{chain.size()}; i < best_chain.size(); ++i) {
-            if (best_chain[i].miner_id == id) stale_blocks--;
-            chain.push_back(best_chain[i]);
-        }
+        // A selfish miner which finds a block while in a race publishes it immediately, as its chain
+        // is now the longest. The blocks before it were already published by MaybeSelfishReveal().
+        return tip;
     }
 
     /** If this miner follows the selfish mining strategy, choose whether to selectively reveal some
      * blocks. The strategy implemented here follows the one described in the 2013 "Majority is not enough"
      * research paper in the worst case scenario, ie Gamma=0 (in the case of a 1-block race no other miner
      * mines on top of a selfish miner's block). Paper available at https://arxiv.org/pdf/1311.0243.
+     *
+     * Returns the last of the blocks it reveals, if any. All the blocks before it are published along with it.
      */
-    void MaybeSelfishReveal(std::span<const Block> best_chain, std::chrono::milliseconds cur_time) {
-        if (strategy != Strategy::SELFISH) return;
+    std::optional<BlockId> MaybeSelfishReveal(const BlockTree& blocks) {
+        if (strategy != Strategy::SELFISH) return std::nullopt;
 
-        // If their chain is already longer than ours, we have to switch. The selfish blocks will be
-        // overwritten by MaybeReorg().
-        if (best_chain.size() > chain.size()) return;
-
-        // If our chain is still at least the same size, we keep mining on it. Note that even when they
-        // are the same size, we may be mining on top of a different block still in the case of a 1-block
-        // race.
+        // Our chain is at least the same size as the best published one, we keep mining on it. Note that even
+        // when they are the same size, we may be mining on top of a different block still in the case of a
+        // 1-block race.
         // If they are catching up, reveal as many blocks as they have just found.
-        const size_t selfish_count{SelfishBlocks()};
-        const size_t current_lead{chain.size() - best_chain.size()};
-        if (selfish_count > current_lead) {
-            size_t reveal_count{selfish_count - current_lead};
-            // Special case: if we had a significant lead and they are almost caught up reveal everything
-            // now to avoid a race.
-            if (selfish_count > 1 && current_lead == 1) {
-                reveal_count = selfish_count;
-            }
-            // Broadcast as many blocks as necessary by setting their arrival time. We reveal them in reaction
-            // to a block the other miners received at the same time as us, so ours necessarily arrive after
-            // it even if they propagate instantly. NOTE: this also makes sure the simulation never misses
-            // a block revealed now, as it only looks for blocks arriving after the current time.
-            const auto arrival{cur_time + std::max(propagation, 1ms)};
-            for (size_t i{0}; i < reveal_count; ++i) {
-                chain.at(chain.size() - selfish_count + i).arrival = arrival;
-            }
+        const size_t current_lead{blocks.Height(tip) - blocks.Height(public_tip)};
+        if (withheld_blocks <= current_lead) return std::nullopt;
+        size_t reveal_count{withheld_blocks - current_lead};
+        // Special case: if we had a significant lead and they are almost caught up reveal everything
+        // now to avoid a race.
+        if (withheld_blocks > 1 && current_lead == 1) {
+            reveal_count = withheld_blocks;
         }
+        withheld_blocks -= reveal_count;
+        return blocks.Ancestor(tip, blocks.Height(tip) - withheld_blocks);
     }
 
-    /** Let this miner know about the longest published chain. */
-    void NotifyBestChain(std::span<const Block> best_chain, std::chrono::milliseconds cur_time) {
-        MaybeSelfishReveal(best_chain, cur_time);
-        MaybeReorg(best_chain);
-        // Remember where the best chain stands, FoundBlock() needs to know.
-        best_tip = {best_chain.size(), best_chain.back()};
+    /** Let this miner know a block was received by all the miners which did not find it, and with it all the
+     * blocks before it in its chain. The miner which found this block is told too: its block is now part of
+     * a published chain. Returns a block this miner publishes in reaction, if any. */
+    std::optional<BlockId> ReceivedBlock(const BlockTree& blocks, BlockId block) {
+        // Among published chains of the same size, the best one is the first one received (matching Bitcoin
+        // Core's first-seen rule).
+        if (blocks.Height(block) > blocks.Height(public_tip)) {
+            public_tip = block;
+        }
+
+        // Of course we assume all blocks are at the same difficulty. If the best published chain is longer
+        // than ours we have to switch to it, even if we had not published the last blocks of ours.
+        if (blocks.Height(public_tip) > blocks.Height(tip)) {
+            tip = public_tip;
+            withheld_blocks = 0;
+            return std::nullopt;
+        }
+
+        return MaybeSelfishReveal(blocks);
     }
 
-    /** Count of published blocks found by this miner. */
-    long BlocksFound(std::chrono::milliseconds cur_time) const {
-        return std::count_if(chain.begin(), chain.end(), [&](const Block& b) {
-            return b.miner_id == id && b.arrival <= cur_time;
-        });
-    }
-
-    /** Compute the share of (published) blocks found by this miner. */
-    double BlocksFoundShare(std::chrono::milliseconds cur_time) const {
-        size_t published_blocks{chain.size() - UnpublishedBlocks(cur_time)};
-        long found_blocks{BlocksFound(cur_time)};
-        return static_cast<double>(found_blocks) / (published_blocks - 1); // -1 for the genesis
-    }
-
-    /** Proportion of stale blocks among all the blocks found by this miner. */
-    double StaleRate(std::chrono::milliseconds cur_time) const {
-        // BlocksFound() only counts the blocks still in our chain, i.e. those which did not go stale.
-        long total_found{BlocksFound(cur_time) + stale_blocks};
-        if (total_found == 0) return 0.0;
-        return static_cast<double>(stale_blocks) / total_found;
+    /** How many of the blocks this miner found are not in its chain anymore. NOTE: a block which was dropped
+     * from its chain is not stale anymore if it makes it back into it, which happens when another miner kept
+     * mining on top of it. */
+    long StaleBlocks(const BlockTree& blocks) const {
+        return blocks_found - blocks.BlocksFoundBy(id, tip);
     }
 };
 
@@ -255,17 +203,16 @@ struct MinerStats {
     //! The ratio of stale blocks over all the blocks found by this miner, whether in the best chain or not.
     double stale_rate;
 
-    /** Compute revenue statistics for this miner in the given best chain. */
-    explicit MinerStats(const Miner& miner, std::span<const Block> best_chain)
+    /** Compute revenue statistics for this miner in the best chain, which ends in `best_tip`. */
+    explicit MinerStats(const Miner& miner, const BlockTree& blocks, BlockId best_tip)
     {
-        blocks_found = std::count_if(best_chain.begin(), best_chain.end(), [&miner](const Block& b) {
-            return b.miner_id == miner.id;
-        });
-        // -1 for the genesis block.
-        blocks_share = blocks_found == 0 ? 0.0 : static_cast<double>(blocks_found) / (best_chain.size() - 1);
+        blocks_found = blocks.BlocksFoundBy(miner.id, best_tip);
+        // The height of the last block is the number of blocks in the chain, not counting the genesis block.
+        blocks_share = blocks_found == 0 ? 0.0 : static_cast<double>(blocks_found) / blocks.Height(best_tip);
         // The blocks found by this miner are those which made it to the best chain plus the stale ones.
-        const long total_found{blocks_found + miner.stale_blocks};
-        stale_rate = total_found == 0 ? 0.0 : static_cast<double>(miner.stale_blocks) / total_found;
+        const long stale_blocks{miner.StaleBlocks(blocks)};
+        const long total_found{blocks_found + stale_blocks};
+        stale_rate = total_found == 0 ? 0.0 : static_cast<double>(stale_blocks) / total_found;
     }
 
     explicit MinerStats(): blocks_found{0}, blocks_share{0.0}, stale_rate{0.0} {}
@@ -279,52 +226,20 @@ struct MinerStats {
     }
 };
 
-/** Get the best chain known by any miner. */
-std::span<const Block> BestChain(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
-{
-    std::span<const Block> best_chain;
+/** Something which happens at a given time during a simulation. */
+struct Event {
+    enum class Type {
+        //! One of the miners finds a block.
+        BLOCK_FOUND,
+        //! A block published by a miner is received by all the other miners.
+        BLOCK_RECEIVED,
+    };
 
-    for (const auto& miner: miners) {
-        const auto pub_chain{miner.PublishedChain(cur_time)};
-        const bool more_work{pub_chain.size() > best_chain.size()};
-        const bool first_seen{pub_chain.size() == best_chain.size() && !pub_chain.empty() && pub_chain.back().arrival < best_chain.back().arrival};
-        if (more_work || first_seen) {
-            best_chain = pub_chain;
-        }
-    }
-
-    return best_chain;
-}
-
-/** Has any miner published a block that was not yet received by the entirety of the network? */
-bool AnyBlockInFlight(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
-{
-    for (const auto& miner: miners) {
-        const auto unpublished_blocks{miner.UnpublishedBlocks(cur_time)};
-        if (miner.strategy != Strategy::SELFISH && unpublished_blocks > 0) {
-            return true;
-        } else if (miner.strategy == Strategy::SELFISH && unpublished_blocks > miner.SelfishBlocks()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/** The earliest next block to arrive, if any. */
-std::optional<std::chrono::milliseconds> EarliestArrival(const std::vector<Miner>& miners, std::chrono::milliseconds cur_time)
-{
-    std::optional<std::chrono::milliseconds> earliest_arrival{};
-    for (const auto& miner: miners) {
-        if (const auto next_arrival = miner.NextArrival(cur_time)) {
-            if (earliest_arrival.has_value()) {
-                earliest_arrival = std::min(earliest_arrival.value(), next_arrival.value());
-            } else {
-                earliest_arrival = next_arrival;
-            }
-        }
-    }
-    return earliest_arrival;
-}
+    std::chrono::milliseconds time;
+    Type type;
+    //! The block received. Not used when a block is found: which miner finds it is only drawn then.
+    BlockId block{GENESIS};
+};
 
 /** Simulate the Bitcoin mining process for a given amount of time with the given miners, each having its
  * own share of network hashrate and block propagation time.
@@ -336,9 +251,9 @@ std::optional<std::chrono::milliseconds> EarliestArrival(const std::vector<Miner
  * exponential distribution, then draw which miner found this block based on its hashrate and a uniform
  * distribution. Difficulty and network hashrate are assumed to be constant.
  *
- * This assumes today's Bitcoin Core behaviour: a miner will mine on top of its own block immediately and will
+ * This assumes today's miners' behaviour by default: a miner will mine on top of its own block immediately and will
  * only switch to a propagated chain if it's longer (again, difficulty is assumed constant). Miners can optionally
- * be set to adopt the "selfish mining" strategy in SetupMiners().
+ * be set to adopt another strategy in SetupMiners(), see `Strategy`.
  *
  * All the randomness is derived from the given seed: the same seed always results in the same simulation.
  */
@@ -349,65 +264,69 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
     RNG seeder{seed};
     RNG block_interval{seeder.rand64()}, miner_picker{seeder.rand64()};
 
-    // Absolute time of the next block arrival. Since we are starting from 0, for the first one this is
-    // just the block interval itself.
-    std::chrono::milliseconds next_block_time{NextBlockInterval(block_interval)};
+    BlockTree blocks;
+    // The last block of the best published chain. Among chains of the same size, this is the one which was
+    // received first (matching Bitcoin Core's first-seen rule).
+    BlockId best_tip{GENESIS};
 
-    std::chrono::milliseconds mean_prop_time{0};
-    for (const auto& miner: miners) {
-        mean_prop_time += miner.propagation;
-    }
-    mean_prop_time /= miners.size();
-    mean_prop_time = std::max(1ms, mean_prop_time);
+    // There is only two events that may change the state of miners (including the selfish ones): a block is
+    // found, or a block is received. We keep track of those to come, starting with the first block to be found.
+    // Since we are starting from 0, its time is just the block interval itself.
+    std::vector<Event> events;
+    events.push_back({NextBlockInterval(block_interval), Event::Type::BLOCK_FOUND});
 
-    // Run the simulation. As we advance time, we check if a block was found, and if so which miner
-    // found it. We also check if any miner needs to reorg once one miner's chain reached it.
-    for (std::chrono::milliseconds cur_time{0}; cur_time < duration_time; ) {
-        // Has a block been found by now? NOTE: `while` and not `if` in the unlikely case that
-        // NextBlockInterval() returns 0.
-        while (cur_time == next_block_time) {
+    // Run the simulation. Instead of iterating through every ms where nothing will happen, go from one event
+    // to the next. Events which happen at the same time are handled in the order they were added, except that
+    // a block is found last: by then the miners know about everything else which happens at that time.
+    while (true) {
+        // NOTE: there is always an event to come, since finding a block adds the time of the next one.
+        const auto next_event{std::ranges::min_element(events, {}, [](const Event& event) {
+            return std::pair{event.time, event.type == Event::Type::BLOCK_FOUND};
+        })};
+        const Event event{*next_event};
+        if (event.time >= duration_time) break;
+        events.erase(next_event);
+
+        if (event.type == Event::Type::BLOCK_FOUND) {
+            // A block was found, draw which miner found it. Its finder may not publish it right away.
             Miner& miner{PickFinder(miners, miner_picker)};
-            miner.FoundBlock(next_block_time);
-            next_block_time += NextBlockInterval(block_interval);
-        }
-        assert(cur_time < next_block_time); // Must never miss any as we advance in steps of 1ms.
-
-        // Record the best propagated chain among all miners, and let them all know about it. They
-        // might switch to it if it's longer or act upon the information (for instance a selfish miner
-        // may selectively reveal some of its private blocks). Among chains of the same size, pick
-        // the one which arrived first (matching Bitcoin Core's first-seen rule).
-        const auto best_chain{BestChain(miners, cur_time)};
-        for (auto& miner: miners) {
-            miner.NotifyBestChain(best_chain, cur_time);
-        }
-
-        // There is only two events that may change the state of miners (including the selfish ones):
-        // a block is found, or a block is received. Instead of iterating through every ms where nothing
-        // will happen, cut-through to the next event.
-        const auto earliest_arrival{EarliestArrival(miners, cur_time)};
-        cur_time = next_block_time;
-        if (earliest_arrival.has_value()) {
-            if (earliest_arrival.value() < cur_time) {
-                cur_time = earliest_arrival.value();
+            if (const auto published{miner.FoundBlock(blocks)}) {
+                events.push_back({event.time + miner.propagation, Event::Type::BLOCK_RECEIVED, *published});
+            }
+            events.push_back({event.time + NextBlockInterval(block_interval), Event::Type::BLOCK_FOUND});
+        } else {
+            // A block was received, let all miners know about it. They might switch to it if its chain is
+            // longer than theirs, or act upon the information (for instance a selfish miner may selectively
+            // reveal some of its private blocks).
+            if (blocks.Height(event.block) > blocks.Height(best_tip)) {
+                best_tip = event.block;
+            }
+            for (auto& miner: miners) {
+                if (const auto published{miner.ReceivedBlock(blocks, event.block)}) {
+                    events.push_back({event.time + miner.propagation, Event::Type::BLOCK_RECEIVED, *published});
+                }
             }
         }
     }
 
-    const auto best_chain{BestChain(miners, duration_time)};
     std::vector<MinerStats> stats;
     for (const auto& miner: miners) {
-        stats.emplace_back(MinerStats(miner, best_chain));
+        stats.emplace_back(MinerStats(miner, blocks, best_tip));
     }
 
     return stats;
 }
 
-/** Utility function useful in tests or for debugging. */
-void PrintChain(const Miner& miner)
+/** Utility function useful in tests or for debugging. Prints which miner found each block of this miner's chain. */
+void PrintChain(const Miner& miner, const BlockTree& blocks)
 {
+    std::vector<unsigned> miner_ids;
+    for (BlockId block{miner.tip}; block != GENESIS; block = blocks.Parent(block)) {
+        miner_ids.push_back(blocks.MinerId(block));
+    }
     std::cout << "Miner " << miner.id << " chain: ";
-    for (const auto&b : miner.chain) {
-        std::cout << "(" << b.miner_id << ", " << b.arrival << "), ";
+    for (const auto miner_id: std::views::reverse(miner_ids)) {
+        std::cout << miner_id << ", ";
     }
     std::cout << std::endl;
 }
