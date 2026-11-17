@@ -218,6 +218,48 @@ void TestPropagationDelay()
     std::cout << "Propagation delay tests passed." << std::endl;
 }
 
+/** When the hashers of a miner are behind its node, they find blocks which do not make the miner's chain longer.
+ * These must go stale at a rate we can compute. */
+void TestInternalDelays()
+{
+    // Blocks propagate instantly between miners: only the delays between the largest miner's node and its hashers
+    // make blocks go stale. What matters is the sum of the two delays, however it is split between them.
+    constexpr std::chrono::seconds TOTAL_DELAY{10};
+    for (const std::chrono::seconds submit_delay: {0s, 4s, 10s}) {
+        std::vector<Miner> miners;
+        miners.emplace_back(0, 50, 0s, Strategy::OWN_BLOCK_FIRST, submit_delay, TOTAL_DELAY - submit_delay);
+        miners.emplace_back(1, 30, 0s);
+        miners.emplace_back(2, 20, 0s);
+
+        // The probability that miners with this share of the network hashrate find a block within `TOTAL_DELAY`.
+        const auto p_block_within_delay = [&](double hashrate) {
+            return 1 - std::exp(-hashrate * TOTAL_DELAY / BLOCK_INTERVAL);
+        };
+        const double hashrate{Hashrate(miners[0])};
+
+        // A block of the delayed miner competes with a block found by another miner within `TOTAL_DELAY` of it:
+        // either its node received the other block but its hashers were not working on top of it yet, or the other
+        // block was found while its own was on its way to its node. The other miners received the other block first,
+        // so its own goes stale unless it also finds the next block.
+        double expected_stale_rate{p_block_within_delay(1 - hashrate) * (1 - hashrate)};
+        // Besides, its hashers may find a second block before they start working on top of the first. The second
+        // one always goes stale.
+        expected_stale_rate += p_block_within_delay(hashrate);
+        // In turn a block of another miner goes stale if the delayed miner finds a competing block, then the next one.
+        const double expected_others_stale_rate{p_block_within_delay(hashrate) * hashrate};
+
+        // As for ExpectedStaleRate() these ignore what happens when more than two blocks compete. We accept a 5%
+        // difference with them.
+        const auto results{RunSimulations(miners)};
+        assert(std::abs(results[0].stale_rate.Mean() / expected_stale_rate - 1) < 0.05);
+        for (size_t i{1}; i < miners.size(); ++i) {
+            assert(std::abs(results[i].stale_rate.Mean() / expected_others_stale_rate - 1) < 0.05);
+        }
+    }
+
+    std::cout << "Internal delays tests passed." << std::endl;
+}
+
 /** The share of blocks expected for a selfish miner with a share `alpha` of the network hashrate. This is the
  * revenue of the pool given by equation (8) in the 2013 paper (https://arxiv.org/pdf/1311.0243) for gamma=0, i.e.
  * when no other miner ever mines on top of the selfish miner's block in a race. */
@@ -262,6 +304,13 @@ BlockId AddBlocks(BlockTree& blocks, BlockId parent, std::initializer_list<unsig
     return parent;
 }
 
+/** Have a miner find a block on top of its chain, as it does when its hashers are working on top of the last
+ * block of its chain. Returns this block if the miner publishes it. */
+std::optional<BlockId> FindBlock(Miner& miner, BlockTree& blocks)
+{
+    return miner.FoundBlock(blocks, blocks.Add(miner.id, miner.tip));
+}
+
 /** A selfish miner whose chain is the published chain ending in `public_tip`, followed by a number of blocks
  * it found on top of it and did not publish. */
 Miner SelfishMiner(BlockTree& blocks, unsigned id, BlockId public_tip, size_t withheld_blocks)
@@ -269,7 +318,7 @@ Miner SelfishMiner(BlockTree& blocks, unsigned id, BlockId public_tip, size_t wi
     Miner selfish_miner{id, 35, 100ms, Strategy::SELFISH};
     selfish_miner.ReceivedBlock(blocks, public_tip);
     for (size_t i{0}; i < withheld_blocks; ++i) {
-        selfish_miner.FoundBlock(blocks);
+        FindBlock(selfish_miner, blocks);
     }
     assert(selfish_miner.withheld_blocks == withheld_blocks);
     return selfish_miner;
@@ -291,13 +340,13 @@ void TestSelfishStrategy()
 
         // Private fork of 0 block, best chain fork of 0 block, pool finds a block. "The pool appends
         // one block to its private branch, increasing its lead on the public branch by one."
-        assert(!selfish_miner.FoundBlock(blocks)); // Not published.
+        assert(!FindBlock(selfish_miner, blocks)); // Not published.
         assert(blocks.Height(selfish_miner.tip) == 3);
         assert(selfish_miner.withheld_blocks == 1);
 
         // Private chain of 1 block, best chain fork of 0 block, pool finds a block. "The pool appends
         // one block to its private branch, increasing its lead on the public branch by one."
-        assert(!selfish_miner.FoundBlock(blocks));
+        assert(!FindBlock(selfish_miner, blocks));
         assert(blocks.Height(selfish_miner.tip) == 4);
         assert(selfish_miner.withheld_blocks == 2);
         // Its chain is the public chain followed by its two blocks.
@@ -319,14 +368,14 @@ void TestSelfishStrategy()
         assert(selfish_miner.ReceivedBlock(blocks, others_block) == selfish_block);
 
         // Now the selfish miner finds a block. "The pool publishes its secret branch of length two".
-        const auto published{selfish_miner.FoundBlock(blocks)};
+        const auto published{FindBlock(selfish_miner, blocks)};
         assert(published == selfish_miner.tip);
         assert(blocks.Parent(selfish_miner.tip) == selfish_block);
         assert(selfish_miner.withheld_blocks == 0);
 
         // The others receive it, and so does he. He won the race, and is back to withholding the blocks he finds.
         assert(!selfish_miner.ReceivedBlock(blocks, *published));
-        assert(!selfish_miner.FoundBlock(blocks));
+        assert(!FindBlock(selfish_miner, blocks));
         assert(selfish_miner.withheld_blocks == 1);
     }
 
@@ -350,7 +399,7 @@ void TestSelfishStrategy()
         assert(selfish_miner.tip == others_next_block);
 
         // He lost the race, and is back to withholding the blocks he finds.
-        assert(!selfish_miner.FoundBlock(blocks));
+        assert(!FindBlock(selfish_miner, blocks));
         assert(blocks.Parent(selfish_miner.tip) == others_next_block);
         assert(selfish_miner.withheld_blocks == 1);
     }
@@ -472,7 +521,7 @@ void TestStaleBlocks()
     Miner miner{MINER_ID, 30, 1s};
 
     // The miner finds a block but the 2-blocks chain of another miner is propagated first. Its block is stale.
-    const BlockId miner_block{*miner.FoundBlock(blocks)};
+    const BlockId miner_block{*FindBlock(miner, blocks)};
     const BlockId other_chain{AddBlocks(blocks, GENESIS, {OTHER_A, OTHER_A})};
     miner.ReceivedBlock(blocks, other_chain);
     assert(miner.tip == other_chain);
@@ -487,13 +536,85 @@ void TestStaleBlocks()
     std::cout << "Stale blocks accounting tests passed." << std::endl;
 }
 
+/** Test what a miner does with the blocks its hashers find when they are not working on top of the last block of
+ * its chain, because of the time it takes them to receive work on top of it. */
+void TestHashersBehindNode()
+{
+    constexpr int MINER_ID{0}, OTHER_ID{1};
+
+    /** The hashers have not received work on top of a block from another miner. */
+    {
+        BlockTree blocks;
+        Miner miner{MINER_ID, 30, 1s};
+
+        // The node of the miner receives a block from another miner and switches to it.
+        const BlockId other_block{blocks.Add(OTHER_ID, GENESIS)};
+        miner.ReceivedBlock(blocks, other_block);
+        assert(miner.tip == other_block);
+
+        // Its hashers are still working on top of the previous block, and find one. The miner prefers its own
+        // block: its node switches to it and publishes it.
+        assert(miner.work_tip == GENESIS);
+        const BlockId miner_block{blocks.Add(MINER_ID, miner.work_tip)};
+        assert(miner.FoundBlock(blocks, miner_block) == miner_block);
+        assert(miner.tip == miner_block);
+        assert(miner.StaleBlocks(blocks) == 0);
+    }
+
+    /** The hashers have not received work on top of a block they found. */
+    {
+        BlockTree blocks;
+        Miner miner{MINER_ID, 30, 1s};
+
+        // The hashers find a block, which the miner publishes.
+        const BlockId first_block{blocks.Add(MINER_ID, miner.work_tip)};
+        assert(miner.FoundBlock(blocks, first_block) == first_block);
+
+        // They are still working on top of the previous block, and find a second one. The miner sticks to the
+        // first one, which other miners may already be working on top of. The second one is stale.
+        assert(miner.work_tip == GENESIS);
+        const BlockId second_block{blocks.Add(MINER_ID, miner.work_tip)};
+        assert(!miner.FoundBlock(blocks, second_block)); // Not published.
+        assert(miner.tip == first_block);
+        assert(miner.StaleBlocks(blocks) == 1);
+
+        // Once they received work on top of the first block, the next one they find makes the chain longer.
+        miner.work_tip = miner.tip;
+        const BlockId third_block{blocks.Add(MINER_ID, miner.work_tip)};
+        assert(miner.FoundBlock(blocks, third_block) == third_block);
+        assert(miner.tip == third_block);
+        assert(miner.StaleBlocks(blocks) == 1);
+    }
+
+    /** The hashers have not received work on top of a chain which is now two blocks longer. */
+    {
+        BlockTree blocks;
+        Miner miner{MINER_ID, 30, 1s};
+
+        // The node of the miner receives two blocks from another miner.
+        const BlockId other_chain{AddBlocks(blocks, GENESIS, {OTHER_ID, OTHER_ID})};
+        miner.ReceivedBlock(blocks, other_chain);
+
+        // Its hashers find a block on top of the block they are still working on. It is one block short: the
+        // miner does not publish it, it is stale.
+        const BlockId miner_block{blocks.Add(MINER_ID, miner.work_tip)};
+        assert(!miner.FoundBlock(blocks, miner_block));
+        assert(miner.tip == other_chain);
+        assert(miner.StaleBlocks(blocks) == 1);
+    }
+
+    std::cout << "Hashers behind node tests passed." << std::endl;
+}
+
 int main()
 {
     TestSelfishStrategy();
     TestStaleBlocks();
+    TestHashersBehindNode();
     TestMinerPicker();
     TestBlockInterval();
     TestInstantPropagation();
     TestPropagationDelay();
+    TestInternalDelays();
     TestSelfishMining();
 }

@@ -85,9 +85,17 @@ struct Miner {
     std::chrono::milliseconds propagation;
     //! The strategy followed by this miner.
     Strategy strategy;
-    //! The last block of this miner's chain, which it is mining on top of. May differ slightly between miners
-    //! due to propagation time. For a selfish miner the last blocks of this chain may not be published.
+    //! The time for a block found by the hashers of this miner to reach the miner's node.
+    std::chrono::milliseconds submit_delay;
+    //! The time for the hashers of this miner to start working on top of a block, once the miner's node switched
+    //! to it. This goes for a block received from another miner as well as for a block they found themselves.
+    std::chrono::milliseconds work_delay;
+    //! The last block of the chain of this miner's node. May differ slightly between miners due to propagation
+    //! time. For a selfish miner the last blocks of this chain may not be published.
     BlockId tip{GENESIS};
+    //! The block the hashers of this miner are working on top of. This is the last block of the miner's chain,
+    //! or an earlier one if they have not received work on top of it yet.
+    BlockId work_tip{GENESIS};
     //! The last block of the best published chain this miner knows of. A selfish miner compares its own
     //! chain to it.
     BlockId public_tip{GENESIS};
@@ -98,26 +106,45 @@ struct Miner {
     //! How many blocks this miner found.
     long blocks_found{0};
 
-    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, Strategy strategy_ = Strategy::OWN_BLOCK_FIRST)
-        : id{id_}, perc{perc_}, propagation{prop}, strategy{strategy_}
+    explicit Miner(unsigned id_, uint64_t perc_, std::chrono::milliseconds prop, Strategy strategy_ = Strategy::OWN_BLOCK_FIRST,
+                   std::chrono::milliseconds submit_delay_ = 0ms, std::chrono::milliseconds work_delay_ = 0ms)
+        : id{id_}, perc{perc_}, propagation{prop}, strategy{strategy_}, submit_delay{submit_delay_}, work_delay{work_delay_}
     {}
 
-    /** Find a block on top of this miner's chain. Returns this block if the miner publishes it. */
-    std::optional<BlockId> FoundBlock(BlockTree& blocks) {
-        // A selfish miner is in a race if its chain is the same size as the best published chain but ends
-        // in a different block.
-        const bool in_race{blocks.Height(tip) == blocks.Height(public_tip) && tip != public_tip};
-        tip = blocks.Add(id, tip);
+    /** The node of this miner receives a block found by the miner's hashers. Returns this block if the miner
+     * publishes it. */
+    std::optional<BlockId> FoundBlock(const BlockTree& blocks, BlockId block) {
         blocks_found++;
 
-        if (strategy == Strategy::SELFISH && !in_race) {
-            // A selfish miner always withholds the blocks it finds, except in the case of a race.
-            withheld_blocks++;
-            return std::nullopt;
+        if (blocks.Height(block) > blocks.Height(tip)) {
+            // The block makes our chain longer. A selfish miner is in a race if its chain was the same size
+            // as the best published chain but ended in a different block.
+            const bool in_race{blocks.Height(tip) == blocks.Height(public_tip) && tip != public_tip};
+            tip = block;
+            if (strategy == Strategy::SELFISH && !in_race) {
+                // A selfish miner always withholds the blocks it finds, except in the case of a race.
+                withheld_blocks++;
+                return std::nullopt;
+            }
+            // A selfish miner which finds a block while in a race publishes it immediately, as its chain
+            // is now the longest. The blocks before it were already published by MaybeSelfishReveal().
+            return tip;
         }
-        // A selfish miner which finds a block while in a race publishes it immediately, as its chain
-        // is now the longest. The blocks before it were already published by MaybeSelfishReveal().
-        return tip;
+
+        // Our hashers were not working on top of the last block of our chain when they found this one, as
+        // they had not received work on top of it yet. The block does not make our chain longer. If it makes
+        // it the same size as a chain ending in another miner's block we are in a race: switch to our own
+        // block and publish it.
+        const bool race_with_other{blocks.Height(block) == blocks.Height(tip) && blocks.MinerId(tip) != id};
+        if (race_with_other) {
+            tip = block;
+            withheld_blocks = 0;
+            return tip;
+        }
+
+        // Otherwise the block is stale: either our chain is already longer, or it ends in another block of
+        // ours which we keep as other miners may already be working on top of it.
+        return std::nullopt;
     }
 
     /** If this miner follows the selfish mining strategy, choose whether to selectively reveal some
@@ -229,16 +256,22 @@ struct MinerStats {
 /** Something which happens at a given time during a simulation. */
 struct Event {
     enum class Type {
-        //! One of the miners finds a block.
+        //! The hashers of one of the miners find a block.
         BLOCK_FOUND,
+        //! A block found by the hashers of a miner is received by the node of this miner.
+        BLOCK_SUBMITTED,
         //! A block published by a miner is received by all the other miners.
         BLOCK_RECEIVED,
+        //! The hashers of a miner start working on top of a block.
+        WORK_RECEIVED,
     };
 
     std::chrono::milliseconds time;
     Type type;
-    //! The block received. Not used when a block is found: which miner finds it is only drawn then.
+    //! The block concerned. Not used when a block is found: which miner finds it is only drawn then.
     BlockId block{GENESIS};
+    //! The miner whose hashers receive work. Not used by the other events.
+    unsigned miner_id{0};
 };
 
 /** Simulate the Bitcoin mining process for a given amount of time with the given miners, each having its
@@ -246,6 +279,10 @@ struct Event {
  *
  * The propagation time is a simplification: it is the time before which a miner's block has not reached
  * any other miner and after which it has reached all other miners.
+ *
+ * A miner is made of a node and of hashers. By default they act as one: a block found by its hashers is published
+ * at once, and they start working on top of a block as soon as it is received. Each miner can instead be given a
+ * delay for each direction, see `Miner::submit_delay` and `Miner::work_delay`.
  *
  * The mining process is accurately modeled: we draw the time between the last and next block from an
  * exponential distribution, then draw which miner found this block based on its hashrate and a uniform
@@ -264,16 +301,35 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
     RNG seeder{seed};
     RNG block_interval{seeder.rand64()}, miner_picker{seeder.rand64()};
 
+    // Miners are looked up by identifier.
+    for (size_t i{0}; i < miners.size(); ++i) {
+        assert(miners[i].id == i);
+    }
+
     BlockTree blocks;
     // The last block of the best published chain. Among chains of the same size, this is the one which was
     // received first (matching Bitcoin Core's first-seen rule).
     BlockId best_tip{GENESIS};
 
-    // There is only two events that may change the state of miners (including the selfish ones): a block is
-    // found, or a block is received. We keep track of those to come, starting with the first block to be found.
-    // Since we are starting from 0, its time is just the block interval itself.
+    // Only the events of `Event::Type` may change the state of miners (including the selfish ones). We keep
+    // track of those to come, starting with the first block to be found. Since we are starting from 0, its
+    // time is just the block interval itself.
     std::vector<Event> events;
     events.push_back({NextBlockInterval(block_interval), Event::Type::BLOCK_FOUND});
+
+    // The node of a miner receives a block, either from the miner's own hashers or from another miner. Record
+    // what follows from it: the other miners receive the block the miner publishes in reaction, if any, and
+    // if its node switched to another block the miner's hashers receive work on top of it.
+    const auto node_receives_block = [&](Miner& miner, BlockId block, bool from_hashers, std::chrono::milliseconds time) {
+        const BlockId previous_tip{miner.tip};
+        const auto published{from_hashers ? miner.FoundBlock(blocks, block) : miner.ReceivedBlock(blocks, block)};
+        if (published) {
+            events.push_back({time + miner.propagation, Event::Type::BLOCK_RECEIVED, *published});
+        }
+        if (miner.tip != previous_tip) {
+            events.push_back({time + miner.work_delay, Event::Type::WORK_RECEIVED, miner.tip, miner.id});
+        }
+    };
 
     // Run the simulation. Instead of iterating through every ms where nothing will happen, go from one event
     // to the next. Events which happen at the same time are handled in the order they were added, except that
@@ -287,14 +343,23 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
         if (event.time >= duration_time) break;
         events.erase(next_event);
 
-        if (event.type == Event::Type::BLOCK_FOUND) {
-            // A block was found, draw which miner found it. Its finder may not publish it right away.
-            Miner& miner{PickFinder(miners, miner_picker)};
-            if (const auto published{miner.FoundBlock(blocks)}) {
-                events.push_back({event.time + miner.propagation, Event::Type::BLOCK_RECEIVED, *published});
-            }
+        switch (event.type) {
+        case Event::Type::BLOCK_FOUND: {
+            // A block was found, draw which miner found it. Its hashers found it on top of the block they
+            // were working on, and send it to the miner's node.
+            const Miner& miner{PickFinder(miners, miner_picker)};
+            const BlockId block{blocks.Add(miner.id, miner.work_tip)};
+            events.push_back({event.time + miner.submit_delay, Event::Type::BLOCK_SUBMITTED, block});
             events.push_back({event.time + NextBlockInterval(block_interval), Event::Type::BLOCK_FOUND});
-        } else {
+            break;
+        }
+        case Event::Type::BLOCK_SUBMITTED: {
+            // The node of the miner which found this block receives it. It may not publish it right away, or
+            // not at all.
+            node_receives_block(miners[blocks.MinerId(event.block)], event.block, /* from_hashers = */ true, event.time);
+            break;
+        }
+        case Event::Type::BLOCK_RECEIVED: {
             // A block was received, let all miners know about it. They might switch to it if its chain is
             // longer than theirs, or act upon the information (for instance a selfish miner may selectively
             // reveal some of its private blocks).
@@ -302,10 +367,14 @@ std::vector<MinerStats> RunSimulation(std::chrono::milliseconds duration_time, s
                 best_tip = event.block;
             }
             for (auto& miner: miners) {
-                if (const auto published{miner.ReceivedBlock(blocks, event.block)}) {
-                    events.push_back({event.time + miner.propagation, Event::Type::BLOCK_RECEIVED, *published});
-                }
+                node_receives_block(miner, event.block, /* from_hashers = */ false, event.time);
             }
+            break;
+        }
+        case Event::Type::WORK_RECEIVED: {
+            miners[event.miner_id].work_tip = event.block;
+            break;
+        }
         }
     }
 
