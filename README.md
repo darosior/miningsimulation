@@ -3,14 +3,22 @@
 A simple block propagation simulation. Create a network with a given number of miners, each with its
 own proportion of the network hashrate and block propagation time. The block propagation time is a
 simplification: before the threshold no other miner has seen a block, after it all miners have seen
-it. The simulation proceeds by advancing one millisecond at a time from the start, responding to
-events such as new block found, block previously found propagated to the rest of the network, etc.
+it. The simulation proceeds from the start by going from one event to the next, such as new block
+found, block previously found propagated to the rest of the network, etc.
 The time between blocks is drawn from an exponential distribution with mean 600 seconds. Which miner
 found the last block is drawn randomly based on each miner's proportion of the network hashrate.
 
 One goal of this simulation is to be simple yet close to reality. The simplified block propagation
 modeling is an example of that. It also implements only the worst-case selfish mining strategy (no
 Sybil, i.e. $\gamma = 0$ according to the 2013 paper).
+
+A miner is made of a node and of hashers. By default they act as one, but a miner can be given an
+"internal propagation" time in each direction: the time for a block found by its hashers to reach
+its node, and the time for its hashers to start working on top of a block its node switched to. Its
+hashers may then find a block which competes with a block from another miner its node already has.
+By default the miner mines on top of its own block, which Bitcoin Core does when told to with
+`preciousblock`. It can instead be set to stick to the first block its node received, which is
+Bitcoin Core's default behaviour. See `Strategy` and `Miner` in [`simulation.h`](simulation.h).
 
 Thanks to Clara Shikhelman for suggesting a "more obviously correct" way of drawing block intervals
 and attributions. Thanks to Pieter Wuille for suggesting to use and providing the code for a faster
