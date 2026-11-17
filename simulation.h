@@ -50,6 +50,13 @@ struct Miner {
     //! Share of the total network hashrate controlled by the miner, as an integer between 0 and 100.
     uint64_t perc;
     //! The time for blocks produced by this miner to reach all other miners.
+    //! NOTE: a simplification made by this model is to assume there is no "internal propagation
+    //! delay", i.e. as soon as one hasher of a pool found a block, all other hashers of the pool
+    //! start working on that new block. This is not a realistic assumption, in practice it is
+    //! substantial (at least a few hundreds ms, but i expect more for most pools). Accounting for
+    //! that internal delay inside the external propagation delay would be imperfect, as it would
+    //! assume miners aren't actively competing with themselves during that time, and therefore
+    //! underestimate the adverse effects.
     std::chrono::milliseconds propagation;
     //! Local chain on the miner's full node. May differ slightly between miners due to propagation time.
     std::vector<Block> chain;
@@ -327,9 +334,13 @@ std::optional<std::chrono::milliseconds> EarliestArrival(const std::vector<Miner
  * exponential distribution, then draw which miner found this block based on its hashrate and a uniform
  * distribution. Difficulty and network hashrate are assumed to be constant.
  *
- * This assumes today's Bitcoin Core behaviour: a miner will mine on top of its own block immediately and will
- * only switch to a propagated chain if it's longer (again, difficulty is assumed constant). Miners can optionally
- * be set to adopt the "selfish mining" strategy in SetupMiners().
+ * This assumes today's miners' behaviour: a miner will mine on top of its own block immediately and will
+ * only switch to a propagated chain if it's longer (again, difficulty is assumed constant). This behaviour
+ * differs from "stock" Bitcoin Core behaviour (modified through `preciousblock`), which always mines on
+ * first-seen block, even if a miner later submits its own block at the same height. The difference
+ * is hidden by the coarse propagation delay used in this simulation, which does not account for the
+ * internal delay between a miner and its hashers. Miners can optionally be set to adopt the "selfish
+ * mining" strategy in SetupMiners().
  *
  * All the randomness is derived from the given seed: the same seed always results in the same simulation.
  */
