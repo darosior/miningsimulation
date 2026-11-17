@@ -20,10 +20,10 @@ std::vector<Miner> SetupMiners()
     // majority of blocks reach relevant nodes within a second nowadays, improved from close to 10
     // seconds a decade ago.
     miners.emplace_back(0, 30, 1s); // Antpool & co. (Approximation)
-    miners.emplace_back(1, 29, 1s); // Foundry. (Approximation)
-    miners.emplace_back(2, 12, 1s); // ViaBTC. (Approximation)
-    miners.emplace_back(3, 11, 1s); // F2pool. (Approximation)
-    miners.emplace_back(4, 8, 1s); // Spider. (Approximation)
+    miners.emplace_back(1, 27, 1s); // Foundry. (Approximation)
+    miners.emplace_back(2, 13, 1s); // F2pool. (Approximation)
+    miners.emplace_back(3, 10, 1s); // ViaBTC. (Approximation)
+    miners.emplace_back(4, 10, 1s); // Spider. (Approximation)
     miners.emplace_back(5, 5, 1s); // Mara. (Approximation)
     miners.emplace_back(6, 3, 1s); // Secpool. (Approximation)
     // Some made-up small miners
