@@ -46,8 +46,8 @@ Observe how stale blocks inflate the effective hashrate of large miners at the e
 ones, and how reducing block propagation time helps restore a level playing field.
 
 In this example, the simulation is ran twice with a hashrate distribution similar to that of the
-Bitcoin network in 2026. In the first run, block propagation is set to 10 seconds. In the second run
-it is set to 100 milliseconds.
+Bitcoin network in 2026. In the first run, block propagation is set to 100 milliseconds. In the
+second run it is set to 10 seconds.
 
 It's important to highlight how the increased propagation time ultimately impacts profits, as this
 is what drives hashrate towards the largest miners. As an example, consider profit margins of 2% of
@@ -59,22 +59,6 @@ the hashrate. Before the change in propagation time, this increases the profit o
 by 0.2% and reduces the profit of the smallest miner by 0.3%. After the increase in propagation
 time, it **increases the profit of the largest miner by 16%**, and **costs the smallest miner 32%
 of its profit**.
-
-Block propagation set to 10s:
-```
-Running 32768 simulations in parallel using 32 threads.
-100% progress..
-After running 32768 simulations for 365d each, on average:
-  - Miner 0 (30% of network hashrate) found 15623 blocks i.e. 30.0974% of blocks. Stale rate: 0.987576%.
-  - Miner 1 (27% of network hashrate) found 14046 blocks i.e. 27.0598% of blocks. Stale rate: 1.08593%.
-  - Miner 2 (13% of network hashrate) found 6731 blocks i.e. 12.9684% of blocks. Stale rate: 1.54798%.
-  - Miner 3 (10% of network hashrate) found 5172 blocks i.e. 9.96531% of blocks. Stale rate: 1.64771%.
-  - Miner 4 (10% of network hashrate) found 5172 blocks i.e. 9.96517% of blocks. Stale rate: 1.64856%.
-  - Miner 5 (5% of network hashrate) found 2582 blocks i.e. 4.97423% of blocks. Stale rate: 1.81222%.
-  - Miner 6 (3% of network hashrate) found 1548 blocks i.e. 2.98257% of blocks. Stale rate: 1.87599%.
-  - Miner 7 (1% of network hashrate) found 515 blocks i.e. 0.993439% of blocks. Stale rate: 1.93876%.
-  - Miner 8 (1% of network hashrate) found 515 blocks i.e. 0.993658% of blocks. Stale rate: 1.94125%.
-```
 
 Block propagation set to 100ms:
 ```
@@ -90,6 +74,22 @@ After running 32768 simulations for 365d each, on average:
   - Miner 6 (3% of network hashrate) found 1577 blocks i.e. 2.99978% of blocks. Stale rate: 0.0194372%.
   - Miner 7 (1% of network hashrate) found 525 blocks i.e. 1.00005% of blocks. Stale rate: 0.0199559%.
   - Miner 8 (1% of network hashrate) found 525 blocks i.e. 0.999661% of blocks. Stale rate: 0.0193334%.
+```
+
+Block propagation set to 10s:
+```
+Running 32768 simulations in parallel using 32 threads.
+100% progress..
+After running 32768 simulations for 365d each, on average:
+  - Miner 0 (30% of network hashrate) found 15623 blocks i.e. 30.0974% of blocks. Stale rate: 0.987576%.
+  - Miner 1 (27% of network hashrate) found 14046 blocks i.e. 27.0598% of blocks. Stale rate: 1.08593%.
+  - Miner 2 (13% of network hashrate) found 6731 blocks i.e. 12.9684% of blocks. Stale rate: 1.54798%.
+  - Miner 3 (10% of network hashrate) found 5172 blocks i.e. 9.96531% of blocks. Stale rate: 1.64771%.
+  - Miner 4 (10% of network hashrate) found 5172 blocks i.e. 9.96517% of blocks. Stale rate: 1.64856%.
+  - Miner 5 (5% of network hashrate) found 2582 blocks i.e. 4.97423% of blocks. Stale rate: 1.81222%.
+  - Miner 6 (3% of network hashrate) found 1548 blocks i.e. 2.98257% of blocks. Stale rate: 1.87599%.
+  - Miner 7 (1% of network hashrate) found 515 blocks i.e. 0.993439% of blocks. Stale rate: 1.93876%.
+  - Miner 8 (1% of network hashrate) found 515 blocks i.e. 0.993658% of blocks. Stale rate: 1.94125%.
 ```
 
 ## Large minority miner following the selfish mining strategy
